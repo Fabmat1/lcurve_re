@@ -1,4 +1,0 @@
-/home/fabian/CLionProjects/lcurve_reimagined/cmake-build-debug/CMakeFiles/utilities.dir
-/home/fabian/CLionProjects/lcurve_reimagined/cmake-build-debug/CMakeFiles/lcurve_re.dir
-/home/fabian/CLionProjects/lcurve_reimagined/cmake-build-debug/CMakeFiles/edit_cache.dir
-/home/fabian/CLionProjects/lcurve_reimagined/cmake-build-debug/CMakeFiles/rebuild_cache.dir
