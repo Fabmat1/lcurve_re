@@ -1,0 +1,11 @@
+{
+"rules": [
+{
+"primary-output": "CMakeFiles/utilities.dir/src/lcurve_base/light_curve_comp.cpp.o",
+"requires": [
+]
+}
+],
+"version": 0,
+"revision": 0
+}
