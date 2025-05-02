@@ -9,6 +9,8 @@
 #include <vector>
 #include <tuple>
 #include <string>
+#include <utility>
+#include <cmath>
 #include <nlohmann/json.hpp>
 #include "gnuplot-iostream.h"
 #include "src/lcurve_base/lcurve.h"
@@ -31,7 +33,7 @@ int main(int argc, char* argv[]) {
     }
     json config;
     try { config_stream >> config; }
-    catch (const json::parse_error& e) {
+    catch (const json::parse_error &e) {
         cerr << "JSON parse error: " << e.what() << endl;
         return 1;
     }
@@ -47,17 +49,17 @@ int main(int argc, char* argv[]) {
         copy = data;
     }
 
-    double time1=0, time2=0, expose=0, noise=0;
-    int ntime=0, ndivide=0;
+    double time1 = 0, time2 = 0, expose = 0, noise = 0;
+    int ntime = 0, ndivide = 0;
     if (no_file) {
         time1 = config["time1"].get<double>();
         time2 = config["time2"].get<double>();
-        ntime  = config["ntime"].get<int>();
+        ntime = config["ntime"].get<int>();
         expose = config["expose"].get<double>();
-        ndivide= config["ndivide"].get<int>();
-        noise  = config["noise"].get<double>();
+        ndivide = config["ndivide"].get<int>();
+        noise = config["noise"].get<double>();
     } else {
-        noise  = config["noise"].get<double>();
+        noise = config["noise"].get<double>();
     }
 
     if (no_file) {
@@ -68,7 +70,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    int32_t seed = config["seed"].get<int32_t>(); if (seed > 0) seed = -seed;
+    int32_t seed = config["seed"].get<int32_t>();
+    if (seed > 0) seed = -seed;
     int nfile = config["nfile"].get<int>();
     string sout = config["output_file_path"].get<string>();
     string device = config["plot_device"].get<string>();
@@ -105,87 +108,109 @@ int main(int argc, char* argv[]) {
     cout << "Vol-averaged r1 = " << rv1 << endl;
     cout << "Vol-averaged r2 = " << rv2 << endl;
 
-    if (!no_file) for (auto &d : data) d.ferr *= noise;
+    if (!no_file) for (auto &d: data) d.ferr *= noise;
 
-    if ((nfile == 0 || nfile == 1) && device != "none" && device != "null") {
-        // Compute ranges
+    if((nfile == 0 || nfile == 1) && device!="none" && device!="null"){
+        // 1) X‐bounds + centering
         double x1 = data[0].time, x2 = data[0].time;
-        double y1 = data[0].flux - data[0].ferr;
-        double y2 = data[0].flux + data[0].ferr;
-        for (size_t i=1; i<data.size(); ++i) {
-            x1 = min(x1, data[i].time);
-            x2 = max(x2, data[i].time);
-            y1 = min(y1, data[i].flux - data[i].ferr);
-            y2 = max(y2, data[i].flux + data[i].ferr);
-            if (!no_file) {
-                y1 = min(y1, copy[i].flux - copy[i].ferr);
-                y2 = max(y2, copy[i].flux + copy[i].ferr);
-                y1 = min(y1, roff + copy[i].flux - data[i].flux - copy[i].ferr);
-                y2 = max(y2, roff + copy[i].flux - data[i].flux + copy[i].ferr);
-            }
+        for(size_t i=1; i<data.size(); ++i){
+            x1 = std::min(x1, data[i].time);
+            x2 = std::max(x2, data[i].time);
         }
-        double con = 0;
-        if (x2-x1 < 0.01*fabs((x1+x2)/2.)) { con = x1; x1 -= con; x2 -= con; }
-        double dx = x2-x1, dy = y2-y1;
-        if (dx == 0) { x1 -= 1; x2 += 1; } else { x1 -= dx/10; x2 += dx/10; }
-        if (dy == 0) { y1 -= 1; y2 += 1; } else { y1 -= dy/10; y2 += dy/10; }
-
-        // Prepare datasets
-        vector<tuple<double,double,double>> data_err;
-        vector<pair<double,double>> data_line;
-        for (auto &d: data) {
-            double t = d.time - con;
-            data_err.emplace_back(t, d.flux-d.ferr, d.flux+d.ferr);
-            data_line.emplace_back(t, d.flux);
+        double con = 0.0;
+        if(x2 - x1 < 0.01*std::abs((x1 + x2)/2.0)){
+            con = x1;  x1 -= con;  x2 -= con;
         }
-        vector<tuple<double,double,double>> copy_err1, copy_err2;
-        vector<pair<double,double>> copy_pts, copy_res;
-        if (!no_file) {
-            for (size_t i=0; i<copy.size(); ++i) {
-                double t = copy[i].time - con;
-                copy_err1.emplace_back(t, copy[i].flux-copy[i].ferr, copy[i].flux+copy[i].ferr);
-                copy_pts.emplace_back(t, copy[i].flux);
-                double res = roff + copy[i].flux - data[i].flux;
-                copy_err2.emplace_back(t, res-copy[i].ferr, res+copy[i].ferr);
-                copy_res.emplace_back(t, res);
-            }
-        }
+        double xr = x2 - x1;  x1 -= xr/10.0;  x2 += xr/10.0;
 
-        // Launch gnuplot
-        Gnuplot gp;
-        if (!sout.empty() && sout!="null") gp << "set output '" << sout << "'\n";
-        gp << "set xrange ["<<x1<<":"<<x2<<"]\n"  \
-           << "set yrange ["<<y1<<":"<<y2<<"]\n"  \
-           << "set xlabel 'T - "<<con<<"'\n" \
-           << "set ylabel ''\n"       \
-           << "set style line 1 lt 1 lw 5 lc rgb 'black'\n" \
-           << "set style line 2 lt 1 lw 1 lc rgb '#B3B3B3'\n" \
-           << "set style line 3 lt 1 lw 3 lc rgb '#008000'\n";
+        // 2) Build datasets, track flux‐ and residual‐ranges
+        std::vector<std::pair<double,double>>        model_line, obs_pts, resid_pts;
+        std::vector<std::tuple<double,double,double>> obs_err, resid_err;
 
-        // Plot
-        if (!no_file) {
-            gp << "plot '-' using 1:2:3 with yerrorbars ls 2 title 'Copy err', " \
-               <<     "'-' using 1:2 with points ls 3 title 'Copy', " \
-               <<     "'-' using 1:2:3 with yerrorbars ls 2 notitle, " \
-               <<     "'-' using 1:2 with points ls 3 notitle, " \
-               <<     "'-' using 1:2 with lines ls 1 title 'Data'\n";
-            gp.send1d(copy_err1);
-            gp.send1d(copy_pts);
-            gp.send1d(copy_err2);
-            gp.send1d(copy_res);
-            gp.send1d(data_line);
-        } else {
-            if (noise==0.0) {
-                gp << "plot '-' using 1:2 with lines ls 1 title 'Data'\n";
-                gp.send1d(data_line);
+        double fy1=0, fy2=0, r1=0, r2=0;
+        bool first_flux=true, first_resid=true;
+
+        for(size_t i=0; i<data.size(); ++i){
+            double t = data[i].time - con;
+            double m = fit[i];               // model
+            double d = data[i].flux;         // noisy data
+            // Pull original σ from copy (saved before you scaled data)
+            double s = (!no_file ? copy[i].ferr : data[i].ferr);
+            if(s <= 0) s = 1e-3;              // tiny fallback, shouldn't happen
+
+            // model line
+            model_line.emplace_back(t, m);
+
+            // data
+            obs_err.emplace_back(t, d, s);
+            obs_pts.emplace_back(t, d);
+
+            // residual χ = (d – m)/σ
+            double chi = (d - m)/s;
+            resid_err.emplace_back(t, chi, 1.0);
+            resid_pts.emplace_back(t, chi);
+
+            // track flux‐range including error‐bars and model
+            double fmin = std::min(d - s, m);
+            double fmax = std::max(d + s, m);
+            if(first_flux){
+                fy1 = fmin;  fy2 = fmax;  first_flux=false;
             } else {
-                gp << "plot '-' using 1:2:3 with yerrorbars ls 2 title 'Data err', " \
-                   << "'-' using 1:2 with points ls 3 title 'Data pt'\n";
-                gp.send1d(data_err);
-                gp.send1d(data_line);
+                fy1 = std::min(fy1, fmin);
+                fy2 = std::max(fy2, fmax);
+            }
+
+            // track residual‐range including ±1
+            double rmin = chi - 1.0, rmax = chi + 1.0;
+            if(first_resid){
+                r1 = rmin;  r2 = rmax;  first_resid=false;
+            } else {
+                r1 = std::min(r1, rmin);
+                r2 = std::max(r2, rmax);
             }
         }
-    }
 
+        // pad ranges by 10%
+        double dflux = fy2 - fy1;  if(dflux==0) dflux=1.0;
+        fy1 -= 0.1*dflux;  fy2 += 0.1*dflux;
+        double dr    = r2 - r1;    if(dr==0) dr=1.0;
+        r1  -= 0.1*dr;    r2  += 0.1*dr;
+
+        // 3) Launch gnuplot
+        Gnuplot gp;
+        if(device=="qt"||device=="wxt"||device=="x11")
+            gp << "set terminal " << device << " persist\n";
+        else
+            gp << "set terminal qt persist\n";
+
+        gp << "set multiplot layout 2,1 rowsfirst\n";
+
+        // Top panel: Model line + Data errorbars + Data points
+        gp << "set xlabel 'Time (phased)'\n"
+           << "set ylabel 'Flux'\n"
+           << "set xrange ["<<x1<<":"<<x2<<"]\n"
+           << "set yrange ["<<fy1<<":"<<fy2<<"]\n"
+           << "plot "
+              "'-' with lines      lc rgb 'blue'  title 'Model', "
+              "'-' with yerrorbars lc rgb 'red'   title 'Data err', "
+              "'-' with points      lc rgb 'red'   pt 7    title 'Data'\n";
+        gp.send1d(model_line);
+        gp.send1d(obs_err);
+        gp.send1d(obs_pts);
+
+        // Bottom panel: Residuals χ ±1 + residual points + zero‐line
+        gp << "set xlabel 'Time (phased)'\n"
+           << "set ylabel 'Residual (χ)'\n"
+           << "set xrange ["<<x1<<":"<<x2<<"]\n"
+           << "set yrange ["<<r1<<":"<<r2<<"]\n"
+           << "plot "
+              "'-' with yerrorbars lc rgb 'purple' title 'χ ±1', "
+              "'-' with points      lc rgb 'black'  pt 7    title 'χ', "
+              "0 with lines         lc rgb 'gray'         title ''\n";
+        gp.send1d(resid_err);
+        gp.send1d(resid_pts);
+
+        gp << "unset multiplot\n";
+    }
     return 0;
 }
