@@ -1,7 +1,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <string>
-#include "new_subs.h"
+#include "../new_subs.h"
 #include "roche.h"
 
 

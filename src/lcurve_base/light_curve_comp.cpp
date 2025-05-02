@@ -29,7 +29,7 @@
 
 using namespace std;
 
-void Lcurve::light_curve_comp(const Model &mdl,
+void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
                               const Data &data, bool scale,
                               bool rdata, bool info,
                               Subs::Buffer1D<double> &sfac,

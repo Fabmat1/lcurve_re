@@ -18,6 +18,7 @@ namespace Subs {
 
         Buffer2D_Error(const string &str) : runtime_error(str) {
         };
+
     };
 
     //! Buffer class for handling 2D memory.
@@ -129,7 +130,7 @@ namespace Subs {
             ny_ = ny;
             if (nx < 1 || ny < 1)
                 throw Buffer2D_Error(
-                    "Subs::Buffer2D<>::alloc(int, int): nx,ny = " + Subs::str(nx) + ", " + Subs::str(ny));
+                    "Subs::Buffer2D<>::alloc(int, int): nx,ny = " + to_string(nx) + ", " + to_string(ny));
 
             if ((buff = new(std::nothrow) X *[ny]) == NULL) {
                 buff = NULL;
@@ -168,7 +169,7 @@ namespace Subs {
         try {
             alloc(ny_, nx_);
         } catch (const Buffer2D_Error &e) {
-            throw Buffer2D_Error("Subs::Buffer2D<>::Buffer2D(int, int): " + e);
+            throw Buffer2D_Error(string("Subs::Buffer2D<>::Buffer2D(int, int): ") + string(e.what()));
         }
     }
 
@@ -183,7 +184,7 @@ namespace Subs {
         try {
             alloc(ny_, nx_);
         } catch (const Buffer2D_Error &e) {
-            throw Buffer2D_Error("Subs::Buffer2D<>::Buffer2D(const Buffer2D<>&): " + e);
+            throw Buffer2D_Error(string("Subs::Buffer2D<>::Buffer2D(const Buffer2D<>&): ") + string(e.what()));
         }
 
         // copy over data
@@ -202,7 +203,7 @@ namespace Subs {
             try {
                 alloc(obj.ny_, obj.nx_);
             } catch (const Buffer2D_Error &e) {
-                throw Buffer2D_Error("Subs::Buffer2D<>::operator=(const Buffer2D<>&): " + e);
+                throw Buffer2D_Error(string("Subs::Buffer2D<>::operator=(const Buffer2D<>&): ") + string(e.what()));
             }
         }
 
@@ -227,7 +228,7 @@ namespace Subs {
             try {
                 alloc(ny, nx);
             } catch (const Buffer2D_Error &e) {
-                throw Buffer2D_Error("Subs::Buffer2D<>::resize(int, int): " + e);
+                throw Buffer2D_Error(string("Subs::Buffer2D<>::resize(int, int): ") + string(e.what()));
             }
         }
     }

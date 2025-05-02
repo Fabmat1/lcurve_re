@@ -2,13 +2,10 @@
 // Created by fabian on 4/29/25.
 //
 
+#include <map>
+#include "array1d.h"
 #include "lcurve.h"
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
-#include <string>
-#include "new_subs.h"
+#include "../lroche_base/roche.h"
 
 /** Reads in data from a file in the form of a series of lines
  * specifying each 'Datum'. Lines starting with # or blank are ignored
@@ -101,4 +98,13 @@ void Lcurve::Data::wrasc(const std::string& file) const {
     for(const auto & i : *this)
         fout << i << std::endl;
 
+}
+
+std::istream& Lcurve::operator>>(std::istream& s, Point& p) {
+    throw Lcurve_Error("Attempt to use operator>>(std::istream& s, Point&) is an error");
+}
+
+//! Dummy ASCII output operator to allow use of Buffer1D
+std::ostream& Lcurve::operator<<(std::ostream& s, const Point& p) {
+    throw Lcurve_Error("Attempt to use operator<<(std::ostream& s, const Point&) is an error");
 }

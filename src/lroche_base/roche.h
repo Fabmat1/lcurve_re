@@ -5,7 +5,7 @@
 
 #include <string>
 #include <stdexcept>
-#include "new_subs.h"
+#include "../new_subs.h"
 
 namespace Roche {
 

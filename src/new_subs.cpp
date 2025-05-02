@@ -2,7 +2,7 @@
 #include <sstream>
 #include <iomanip>
 #include <string>
-
+#include "lcurve_base/constants.h"
 
 Subs::Format::Format(int precision) :
   precision_(precision), width_(0), format_(std::ios::fmtflags(0)), upper(false),
@@ -60,68 +60,6 @@ void Subs::Format::right(){
 
 void Subs::Format::internal(){
   fadjust = std::ios::internal;
-}
-
-
-double Subs::svdfit(const Buffer1D<ddat>& data, Buffer1D<double>& a, const Buffer2D<double>& vect,
-        Buffer2D<double>& u, Buffer2D<double>& v, Buffer1D<double>& w){
-
-  if(a.size() != vect.get_nx())
-    throw Subs_Error("svdfit[double]: number of coefficients = " + to_string(a.size()) +
-         " in parameter vector does not match number in function array = " + to_string(vect.get_nx()));
-  if(data.size() != vect.get_ny())
-    throw Subs_Error("svdfit[double]: number of data = " + to_string(data.size()) +
-         " does not match number in function array = " + to_string(vect.get_ny()));
-
-  size_t ndata = data.size();
-  size_t nc    = a.size();
-  size_t ndat = 0;
-  size_t i, j, k;
-  for(j=0; j<ndata; j++)
-    if(data[j].z>0.) ndat++;
-
-  u.resize(ndat,nc);
-  v.resize(nc,nc);
-  w.resize(nc);
-
-  const double TOL = 1.e-5;
-  double tmp;
-
-  Buffer1D<double> b(ndat);
-  for(i=0,k=0; i<ndata; i++){
-    if(data[i].z>0.){
-      tmp = 1./data[i].z;
-      for(j=0; j<nc; j++)
-        u[k][j] = tmp*vect[i][j];
-      b[k] = tmp*data[i].y;
-      k++;
-    }
-  }
-
-  svdcmp(u, w, v);
-
-  // Edit singular values
-  double wmax = 0.;
-  for(i=0; i<nc; i++)
-    if(w[i] > wmax) wmax = w[i];
-
-  double thresh = TOL*wmax;
-  for(i=0; i<nc; i++)
-    if(w[i] < thresh) w[i] = 0.;
-
-  // Carry on
-  svbksb(u, w, v, b, a);
-
-  double sum, chisq = 0.;
-
-  for(i=0,k=0; i<ndata; i++){
-    if(data[i].z>0.){
-      for(j=0, sum=0.; j<nc; j++)
-        sum += a[j]*vect[i][j];
-      chisq += ((data[i].y-sum)/data[i].z)*((data[i].y-sum)/data[i].z);
-    }
-  }
-  return chisq;
 }
 
 // //! Extractor for doubles
@@ -184,19 +122,44 @@ double Subs::svdfit(const Buffer1D<ddat>& data, Buffer1D<double>& a, const Buffe
 // }
 
 
+double Subs::planck(double wave, double temp){
 
+    const double FAC1 = 2.e27*Constants::H*Constants::C;
+    const double FAC2 = 1.e9*Constants::H*Constants::C/Constants::K;
 
+    double efac = FAC2/(wave*temp);
+    if(efac > 40.){
+        return FAC1*exp(-efac)/(wave*sqr(wave));
+    }else{
+        return FAC1/(exp(efac)-1.)/(wave*sqr(wave));
+    }
+}
 
+/** Computes the logarithmic derivative of the Planck function
+ * Bnu wrt wavelength (i.e. d ln(Bnu) / d ln(lambda)) as a function of wavelength and temperature
+ * \param wave wavelength in nanometres
+ * \param temp temperature in K
+ */
 
+double Subs::dplanck(double wave, double temp){
 
+    const double FAC2 = 1.e9*Constants::H*Constants::C/Constants::K;
 
+    double efac = FAC2/(wave*temp);
+    return efac/(1.-exp(-efac)) - 3.;
+}
 
+/** Computes the logarithmic derivative of the Planck function
+ * Bnu wrt T (i.e. d ln(Bnu) / d ln(T)) as a function of wavelength and temperature
+ * \param wave wavelength in nanometres
+ * \param temp temperature in K
+ */
 
+double Subs::dlpdlt(double wave, double temp){
 
+    const double FAC2 = 1.e9*Constants::H*Constants::C/Constants::K;
 
-
-
-
-
-
+    double efac = FAC2/(wave*temp);
+    return efac/(1.-exp(-efac));
+}
 

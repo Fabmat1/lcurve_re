@@ -11,31 +11,22 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
-#include "lcurve_base/array1d.h"
-#include "lcurve_base/buffer2d.h"
 #include <array>
 #include <cstdint>
 #include <type_traits>
+#include <fstream>
 
 using namespace std;
 
 
 namespace Subs {
+    template <class T> class Array1D;
+    template <class T> class Array2D;
+    template <class T> class Buffer1D;
+    template <class T> class Buffer2D;
+
     template<typename T>
-        requires (std::is_integral_v<T> || std::is_floating_point_v<T>)
-    constexpr T byte_swap(T value) noexcept {
-        if constexpr (std::is_integral_v<T>) {
-            // Directly use the library byte-swap for integers
-            return byteswap(value);
-        } else {
-            // For floats/doubles: cast to unsigned integer of same size,
-            // byteswap that, then cast back
-            using U = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-            U as_int = std::bit_cast<U>(value);
-            as_int = byteswap(as_int);
-            return std::bit_cast<T>(as_int);
-        }
-    }
+    T byte_swap(T value);
 
     class Subs_Error : public std::runtime_error {
     public:
@@ -66,7 +57,7 @@ namespace Subs {
         if (test == "F" || test == "FALSE" || test == "N" || test == "NO" || test == "0") {
             return false;
         }
-        throw Subs_Error("Subs::string_to_bool: could not translate entry = " + entry + "to a bool");
+        throw Subs_Error("to_stringing_to_bool: could not translate entry = " + entry + "to a bool");
     }
 
     template<class X>
@@ -97,6 +88,20 @@ namespace Subs {
         return jhi;
     }
 
+    template <typename T>
+    T select(std::vector<T>& arr, int k) {
+        if (arr.empty()) throw std::invalid_argument("Array is empty");
+        k = std::clamp(k, 0, static_cast<int>(arr.size()) - 1);
+        std::nth_element(arr.begin(), arr.begin() + k, arr.end());
+        return arr[k];
+    }
+
+    //! Return a with the same sign as b
+    template <class X, class Y>
+    inline X sign(const X& a, const Y& b){
+        return(b >= 0. ? (X)fabs(a) : -(X)fabs(a));
+    }
+
     template<class X>
     void hunt(const X *xx, unsigned long int n, X x, unsigned long int &jhi) {
         // Ascending or descending check
@@ -122,13 +127,21 @@ namespace Subs {
         }
     }
 
-    template<typename T>
-    T select(vector<T> &arr, int k) {
-        k = max(0, min(static_cast<int>(arr.size()) - 1, k));
+    //! Abstract class for powell and amoeba
+    /** This class is the base class for usage by the simplex minimisation routine amoeba and
+     * similar routines that need to know a function value given an Array1D of parameters.
+     */
+    class Afunc {
+    public:
+        //! The function call
+        /** This routine should return the function value after it has been passed
+         * a vector of parameters. It is not defined as 'const' since you may well want to
+         * alter the object during the computation.
+         */
+        virtual double operator()(const Array1D<double>& vec) = 0;
+        virtual ~Afunc(){}
+    };
 
-        nth_element(arr.begin(), arr.begin() + k, arr.end());
-        return arr[k];
-    }
 
     //! Abstract class for rtsafe function
     /** This class is the base class for usage by the 'rtsafe'. It declares the one
@@ -165,6 +178,14 @@ namespace Subs {
         virtual ~Sfunc() = default;
     };
 
+    //! 1D minimisation routine without derivatives
+    double brent(double xstart, double x1, double x2, Sfunc& f, double tol, double& xmin);
+
+    //! 1D minimisation with derivatives
+    double dbrent(double ax, double bx, double cx, Sfunc& func, Sfunc& dfunc, double acc,
+                  bool stopfast, double pref, double& xmin);
+
+
     inline string str(const int &con, int ndig) {
         string result = to_string(con);
         int padding_needed = std::max(0, ndig - static_cast<int>(result.size()));
@@ -176,8 +197,14 @@ namespace Subs {
         return result;
     }
 
+    //! Convert degrees to radians
     inline double deg2rad(double deg) {
         return M_PI * deg / 180.;
+    }
+
+    //! Convert radians to degrees
+    inline double rad2deg(double rad){
+        return 180.*rad/M_PI;
     }
 
     class Vec3 {
@@ -394,6 +421,70 @@ namespace Subs {
     template<class X, class Y, class Z>
     std::ostream &operator<<(std::ostream &ost, const xyz<X, Y, Z> &obj);
 
+    template <class X>
+    inline X sqr(const X& a){
+        return (a*a);
+    }
+
+
+    template <class X, class Y>
+    struct xy;
+
+    template <class X, class Y>
+    std::istream& operator>>(std::istream& ist, xy<X,Y>& obj);
+
+    template <class X, class Y>
+    std::ostream& operator<<(std::ostream& ost, const xy<X,Y>& obj);
+
+    //! General 2 variable structure
+
+    /** This is completely general structure for storing pairs of numbers,
+     * for instance time, velocity, error or whatever.
+     */
+    template <class X, class Y>
+    struct xy{
+
+        //! Default constructor
+        xy() : x(0), y(0) {}
+
+        //! Constructor from values
+        xy(const X& xx, const Y& yy) : x(xx), y(yy) {}
+
+        //! X value
+        X x;
+
+        //! Y value
+        Y y;
+
+        //! ASCII input
+        friend std::istream& operator>><>(std::istream& ist, xy<X,Y>& obj);
+
+        //! ASCII output
+        friend std::ostream& operator<<<>(std::ostream& ost, const xy<X,Y>& obj);
+    };
+
+    /** ASCII input operator. Reads two numbers separated by spaces.
+     * \param ist input stream
+     * \param obj the 2 parameter object to read the data into
+     * \return the input stream
+     */
+    template <class X, class Y>
+    std::istream& operator>>(std::istream& ist, xy<X,Y>& obj){
+        ist >> obj.x >> obj.y;
+        return ist;
+    }
+
+    /** ASCII output operator. Writes two numbers separated by spaces.
+     * \param ost output stream
+     * \param obj the 2 parameter object to write out
+     * \return the output stream
+     */
+    template <class X, class Y>
+    std::ostream& operator<<(std::ostream& ost, const xy<X,Y>& obj){
+        ost << obj.x << " " << obj.y;
+        return ost;
+    }
+
     //! General 3 variable structure
 
     /** This is completely general structure for storing triples of numbers,
@@ -533,6 +624,53 @@ namespace Subs {
         ios::fmtflags fadjust;
     };
 
+    //! Burlisch-Stoer routine
+    bool bsstep(double y[], double dydx[], int nv, double& xx,
+                double htry, double eps, double yscal[], double &hdid,
+                double &hnext,
+                void (*derivs)(double, double [], double []));
+
+    //! Modified mid-point routine
+    void  mmid(double y[], double dydx[], int nvar, double xs,
+               double htot, int nstep, double yout[],
+               void (*derivs)(double, double[], double[]));
+
+
+    //! Abstract class for bsstep function object
+    class Bsfunc {
+
+    public:
+
+        //! The function call
+        /** Evaluates derivatives dydt given current time t and coordinates y
+         * use function object to store other parameters needed
+         */
+        virtual void operator()(double t, double y[], double dydt[]) const = 0;
+        virtual ~Bsfunc(){}
+    };
+
+    bool bsstep(double y[], double dydx[], int nv, double &xx,
+                double htry, double eps, double yscal[],
+                double &hdid, double &hnext, const Bsfunc& derivs);
+
+    //! Modified mid-point routine
+    void  mmid(double y[], double dydx[], int nvar, double xs,
+               double htot, int nstep, double yout[],
+               const Bsfunc& derivs);
+
+    // Alternative for mmid for conservative 2nd order equations
+    bool bsstepst(double y[], double dydx[], int nv, double &xx,
+                  double htry, double eps, double yscal[],
+                  double &hdid, double &hnext, const Bsfunc& derivs);
+
+    void stoerm(double y[], double d2y[], int nvar, double xs, double htot,
+                int nstep, double yout[], const Bsfunc& derivs);
+
+    //! Polynomial extrapolation routine
+    void  pzextr(int iest, double xest, double yest[], double yz[],
+                 double dy[], int nv);
+
+
     //! Combination of format and a double
     struct Bound_form_d {
         //! the format
@@ -570,6 +708,433 @@ namespace Subs {
 
     ostream &operator<<(ostream &ostr, const Bound_form_s &bf);
 
+    //! Buffer class for handling memory.
+    /** A class designed to supply a safe 1D array, 'safe' in
+     * that it is deallocated whenever the object goes out of scope.
+     * It creates a pointer to an array which can then be used
+     * in the usual way as an array. The pointer is automatically
+     * deleted when its Buffer1D goes out of scope. It also stores the number
+     * of pixels and the number of memory elements allocated. The latter can
+     * be larger than the number of pixels to make extension of the array size
+     * more efficient. Buffer1D is designed to handle any type of data and therefore
+     * does not supply operations such as addition; look at Array1D for such
+     * specialisation which inherits Buffer1D and adds such facilities. Buffer1D can
+     * therefore contain complex objects as its elements. Such objects will need to
+     * support the operations of assignment and ASCII I/O. Binary I/O functions
+     * write, read and skip are provided but should only be used on objects with
+     * no pointers because they will store the pointers but not whatever they
+     * point to.
+     */
+    template <class X>
+    class Buffer1D {
+    public:
+
+        //! Default constructor, makes NULL pointer.
+        Buffer1D() : buff(NULL), npix(0), nmem(0) {}
+
+        //! Constructor grabbing space for npix points
+        Buffer1D(int npix);
+
+        //! Constructor grabbing space for npix points but with nmem elements allocated
+        Buffer1D(int npix, int nmem);
+
+        //! Constructor from a file name
+        Buffer1D(const std::string& file);
+
+        //! Copy constructor
+        Buffer1D(const Buffer1D& obj);
+
+        //! Constructor from a vector
+        Buffer1D(const std::vector<X>& obj);
+
+        //! Destructor
+        virtual ~Buffer1D(){
+            if(buff != NULL)
+                delete[] buff;
+        }
+
+        //! Assignment
+        Buffer1D& operator=(const Buffer1D& obj);
+
+        //! Assignment
+        Buffer1D& operator=(const X& con);
+
+        //! Returns the number of pixels
+        int get_npix() const {return npix;}
+
+        //! Returns the number of pixels
+        int size() const {return npix;}
+
+        //! Returns the number of pixels allocated in memory
+        int mem() const {return nmem;}
+
+        //! Change number of pixels
+        void resize(int npix);
+
+        //! Zeroes number of elements in the array (but does not change memory allocation)
+        void clear(){npix = 0;}
+
+        //! Change number of pixels directly, no other effect (experts only)
+        void set_npix(int npix){
+            if(npix > nmem)
+                throw runtime_error("Subs::Buffer1D::set_npix(int): attempt to set npix > nmem not allowed.");
+            this->npix = npix;
+        }
+
+        //! Element access
+        const X& operator[](int i) const {
+            return buff[i];
+        }
+
+        //! Element access
+        X& operator[](int i) {
+            return buff[i];
+        }
+
+        //! Add another value to the end of the buffer, preserving all other data
+        void push_back(const X& value);
+
+        //! Remove a pixel
+        void remove(int index);
+
+        //! Insert a pixel
+        void insert(int index, const X& value);
+
+        //! Conversion operator for interfacing with normal C style arrays.
+        operator X*(){return buff;}
+
+        //! Returns pointer to the buffer to interface with functions requiring normal C style arrays.
+        X* ptr() {return buff;}
+
+        //! Returns pointer to the buffer to interface with functions requiring normal C style arrays.
+        const X* ptr() const {return buff;}
+
+        //! Read from an ASCII file
+        void load_ascii(const std::string& file);
+
+        //! Write out a Buffer1D to a binary file
+        void write(std::ostream& s) const;
+
+        //! Skip a Buffer1D in a binary file
+        static void skip(std::istream& s, bool swap_bytes);
+
+        //! Read a poly from a binary file
+        void read(std::istream& s, bool swap_bytes);
+
+        //friend std::ostream& operator<<<>(std::ostream& s, const Buffer1D& vec);
+
+        //friend std::istream& operator>><>(std::istream& s, Buffer1D& vec);
+
+    protected:
+
+        //! The pointer; used extensively in Array1D, change at your peril!
+        X* buff;
+
+        //! For derived class ASCII input
+        virtual void ascii_input(std::istream& s);
+
+        //! For derived class ASCII output
+        virtual void ascii_output(std::ostream& s) const;
+
+    private:
+
+        // number of pixels and number of memory elements
+        int npix;
+        int nmem;
+
+    };
+
+
+    /** This constructor gets space for exactly npix points
+     * \param npix the number of points to allocate space for
+     */
+    template <class X>
+    Buffer1D<X>::Buffer1D(int npix) : npix(npix), nmem(npix) {
+        if(npix < 0)
+            throw runtime_error("Subs::Buffer1D<>(int): attempt to allocate < 0 point");
+        if(npix == 0){
+            buff = NULL;
+        }else{
+            if((buff = new(std::nothrow) X [nmem]) == NULL){
+                this->npix = nmem = 0;
+                throw runtime_error("Subs::Buffer1D::Buffer1D(int): failed to allocate memory");
+            }
+        }
+    }
+
+    /** This constructor gets space for exactly npix points
+     * \param npix the number of pixels
+     * \param nmem the number of memory elements
+     */
+    template <class X>
+    Buffer1D<X>::Buffer1D(int npix, int nmem) : npix(npix), nmem(nmem) {
+        if(npix < 0)
+            throw runtime_error("Subs::Buffer1D<>(int, int): attempt to set < 0 pixels");
+        if(nmem < npix)
+            throw runtime_error("Subs::Buffer1D<>(int, int): must allocate at least as many memory elements as pixels");
+        if(nmem == 0){
+            buff = NULL;
+        }else{
+            if((buff = new(std::nothrow) X [nmem]) == NULL){
+                this->npix = nmem = 0;
+                throw runtime_error("Subs::Buffer1D<>(int, int): failure to allocate " + to_string(nmem) + " points.");
+            }
+        }
+    }
+
+    /** Constructor by reading a file
+     * \param file the file to read, an ASCII file.
+     */
+    template <class X>
+    Buffer1D<X>::Buffer1D(const std::string& file) : buff(NULL), npix(0), nmem(0) {
+        try{
+            load_ascii(file);
+        }
+        catch(const runtime_error& err){
+            throw runtime_error("Buffer1D<X>::Buffer1D(const std::string&): error constructing from a file " + string(err.what()));
+        }
+    }
+
+    /** Copy constructor to make an element by element copy of an object
+     */
+    template <class X>
+    Buffer1D<X>::Buffer1D(const Buffer1D<X>& obj) : npix(obj.npix), nmem(obj.npix) {
+        if(nmem == 0){
+            buff = NULL;
+        }else{
+            if((buff = new(std::nothrow) X [nmem]) == NULL){
+                npix = nmem = 0;
+                throw runtime_error("Subs::Buffer1D<>(const Buffer1D<>&): failure to allocate " + to_string(nmem) + " points.");
+            }
+            for(int i=0; i<npix; i++)
+                buff[i] = obj.buff[i];
+        }
+    }
+
+    /** Constructor to make an element by element copy of a vector
+     */
+    template <class X>
+    Buffer1D<X>::Buffer1D(const std::vector<X>& obj) : npix(obj.size()), nmem(obj.size()) {
+        if(nmem == 0){
+            buff = NULL;
+        }else{
+            if((buff = new(std::nothrow) X [nmem]) == NULL){
+                npix = nmem = 0;
+                throw runtime_error("Subs::Buffer1D<>(const std::vector<>&): failure to allocate " + to_string(nmem) + " points.");
+            }
+            for(int i=0; i<npix; i++)
+                buff[i] = obj[i];
+        }
+    }
+
+    /** Sets one Buffer1D equal to another.
+     */
+    template <class X>
+    Buffer1D<X>& Buffer1D<X>::operator=(const Buffer1D<X>& obj){
+
+        if(this == &obj) return *this;
+
+        // First check whether we can avoid reallocation of memory
+        if(buff != NULL){
+            if(obj.npix <= nmem){
+                npix = obj.npix;
+                for(int i=0; i<npix; i++)
+                    buff[i] = obj.buff[i];
+                return *this;
+            }else{
+                delete[] buff;
+            }
+        }
+
+        // Allocate memory
+        npix = nmem = obj.npix;
+        if(nmem == 0){
+            buff = NULL;
+        }else{
+            if((buff = new(std::nothrow) X [nmem]) == NULL){
+                npix = nmem = 0;
+                throw runtime_error("Subs::Buffer1D<>(const Buffer1D<>&): failure to allocate " + to_string(nmem) + " points.");
+            }
+        }
+
+        // Finally copy
+        for(int i=0; i<npix; i++)
+            buff[i] = obj.buff[i];
+
+        return *this;
+    }
+
+    /** Sets a Buffer1D to a constant
+     */
+    template <class X>
+    Buffer1D<X>& Buffer1D<X>::operator=(const X& con){
+
+        for(int i=0; i<npix; i++)
+            buff[i] = con;
+
+        return *this;
+    }
+
+    /** This changes the number of pixels. It does not preserve the data in general.
+     * \param npix the new array size
+     */
+    template <class X>
+    void Buffer1D<X>::resize(int npix){
+        if(buff != NULL){
+            if(npix <= nmem){
+                this->npix = npix;
+                return;
+            }else{
+                delete[] buff;
+            }
+        }
+
+        this->npix = nmem = npix;
+        if(nmem < 0)
+            throw runtime_error("Subs::Buffer1D::resize(int): attempt to allocate < 0 points");
+        if(nmem == 0){
+            buff = NULL;
+            return;
+        }
+        if((buff = new(std::nothrow) X [nmem]) == NULL){
+            this->npix = nmem = 0;
+            throw runtime_error("Subs::Buffer1D::resize(int): failed to allocate new memory");
+        }
+    }
+
+    /** This routine adds a new value to the end of a buffer, increasing the 
+     * memory allocated if need be.
+     * \param value new value to add to the end
+     */
+    template <class X>
+    void Buffer1D<X>::push_back(const X& value){
+        if(npix < nmem){
+            buff[npix] = value;
+            npix++;
+        }else{
+            nmem *= 2;
+            nmem  = (nmem == 0) ? 1 : nmem;
+            X* temp;
+            if((temp = new(std::nothrow) X [nmem]) == NULL){
+                nmem /= 2;
+                throw runtime_error("Subs::Buffer1D::push_back(const X&): failed to extend memory");
+            }
+            for(int i=0; i<npix; i++)
+                temp[i] = buff[i];
+            temp[npix] = value;
+            npix++;
+            delete[] buff;
+            buff = temp;
+        }
+    }
+
+    /** This routine removes a pixel at a given index. The memory allocated
+     * is not changed.
+     * \param index the pixel to be removed
+     */
+    template <class X>
+    void Buffer1D<X>::remove(int index){
+        npix--;
+        for(int i=index; i<npix; i++)
+            buff[i] = buff[i+1];
+    }
+
+    /** This routine inserts a pixel at a given index. The memory allocated
+     * may have to increase
+     * \param index the pixel to be removed
+     */
+    template <class X>
+    void Buffer1D<X>::insert(int index, const X& value){
+
+        if(npix < nmem){
+            for(int i=npix; i>index; i--)
+                buff[i] = buff[i-1];
+            buff[index] = value;
+            npix++;
+        }else{
+            nmem *= 2;
+            nmem  = (nmem == 0) ? 1 : nmem;
+            X* temp;
+            if((temp = new(std::nothrow) X [nmem]) == NULL){
+                nmem /= 2;
+                throw runtime_error("Subs::Buffer1D::insert(int, const X&): failed to extend memory");
+            }
+            for(int i=0; i<index; i++)
+                temp[i] = buff[i];
+            for(int i=npix; i>index; i--)
+                temp[i] = buff[i-1];
+            temp[index] = value;
+            npix++;
+            delete[] buff;
+            buff = temp;
+        }
+    }
+
+    //! Binary output
+    template <class X>
+    void Buffer1D<X>::write(std::ostream& s) const {
+        s.write((char*)&npix, sizeof(int));
+        s.write((char*)buff,  sizeof(X[npix]));
+    }
+
+    //! Binary input
+    template <class X>
+    void Buffer1D<X>::read(std::istream& s, bool swap_bytes) {
+        s.read((char*)&npix, sizeof(int));
+        if(!s) return;
+        if(swap_bytes) npix = Subs::byte_swap(npix);
+        this->resize(npix);
+        s.read((char*)buff,  sizeof(X[npix]));
+        if(swap_bytes) Subs::byte_swap(buff, npix);
+    }
+
+    //! Binary skip
+    template <class X>
+    void Buffer1D<X>::skip(std::istream& s, bool swap_bytes) {
+        int npixel;
+        s.read((char*)&npixel, sizeof(int));
+        if(!s) return;
+        if(swap_bytes) npixel = Subs::byte_swap(npixel);
+        s.ignore(sizeof(X[npixel]));
+    }
+
+    /* Loads data into a Buffer1D from an ASCII file with one
+     * element per line. The elements must support ASCII input.
+     * Define a suitable structure for complex input. Lines starting with
+     * # are skipped.
+     * \param file the file name to load
+     */
+    template <class Type>
+    void Buffer1D<Type>::load_ascii(const std::string& file){
+
+        std::ifstream fin(file.c_str());
+        if(!fin)
+            throw runtime_error("void Buffer1D<>::load~_ascii(const std::string&): could not open " + file);
+
+        // Clear the buffer
+        this->resize(0);
+        Type line;
+        char c;
+        while(fin){
+            c = fin.peek();
+            if(!fin) break;
+            if(c == '#' || c == '\n'){
+                while(fin.get(c)) if(c == '\n') break;
+            }else{
+                if(fin >> line) this->push_back(line);
+                while(fin.get(c)) if(c == '\n') break; // ignore the rest of the line
+            }
+        }
+        fin.close();
+
+    }
+
+    template <class X>
+    std::ostream& operator<<(std::ostream& s, const Buffer1D<X>& vec){
+        vec.ascii_output(s);
+        return s;
+    }
+
     //! Singular value decomposition fitting
     double svdfit(const Buffer1D<rv> &data, Buffer1D<float> &a,
                   const Buffer2D<float> &vect, Buffer2D<float> &u,
@@ -578,6 +1143,22 @@ namespace Subs {
     //! Singular value decomposition fitting
     double svdfit(const Buffer1D<ddat> &data, Buffer1D<double> &a, const Buffer2D<double> &vect,
                   Buffer2D<double> &u, Buffer2D<double> &v, Buffer1D<double> &w);
+
+    //! Compute sqrt(a*a+b*b) avoiding under/over flows
+    template <class X> X pythag(const X& a, const X& b){
+        X absa, absb, temp;
+        absa = fabs(a);
+        absb = fabs(b);
+        if(absa > absb){
+            temp = absb / absa;
+            return absa*sqrt(1.+temp*temp);
+        }else if(absb == 0.){
+            return 0.;
+        }else{
+            temp = absa / absb;
+            return absb*sqrt(1.+temp*temp);
+        }
+    }
 
     //! Singular value decomposition
     /**
@@ -823,6 +1404,40 @@ namespace Subs {
     double svdfit(const Buffer1D<rv> &data, Buffer1D<float> &a,
                   const Buffer1D<double> &cosine, const Buffer1D<double> &sine,
                   Buffer2D<float> &u, Buffer2D<float> &v, Buffer1D<float> &w);
+
+    //! Planck function Bnu.
+    double planck(double wave, double temp);
+
+    //! Logarithmic derivative of Planck function Bnu wrt wavelength
+    double dplanck(double wave, double temp);
+
+    //! Logarithmic derivative of Planck function Bnu wrt T
+    double dlpdlt(double wave, double temp);
+
+    template<class X>
+    void Buffer1D<X>::ascii_output(std::ostream &s) const {
+        if (!s) return;
+        s << this->size();
+        for (int i = 0; i < this->size(); i++)
+            s << " " << (*this)[i];
+    }
+
+    template<class X>
+    std::istream &operator>>(std::istream &s, Buffer1D<X> &vec) {
+        vec.ascii_input(s);
+        return s;
+    }
+
+    template<class X>
+    void Buffer1D<X>::ascii_input(std::istream &s) {
+        if (!s) return;
+        int nelem;
+        s >> nelem;
+        this->resize(nelem);
+        for (int i = 0; i < this->size(); i++)
+            s >> (*this)[i];
+    }
+
 };
 
 #endif //NEW_SUBS_H
