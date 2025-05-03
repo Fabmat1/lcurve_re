@@ -30,7 +30,7 @@
 using namespace std;
 
 void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
-                              const Data &data, bool scale,
+                              const Lcurve::Data &data, bool scale,
                               bool rdata, bool info,
                               Subs::Buffer1D<double> &sfac,
                               Subs::Array1D<double> &calc, double &wdwarf,
@@ -65,10 +65,14 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     // Generate arrays over each star's face. Fine grids first:
     Subs::Buffer1D<Point> star1f, star2f, disc, edge, spot;
     set_star_grid(mdl, Roche::PRIMARY, true, star1f);
-    if (info) cerr << "Number of points for star 1 (fine) = " << star1f.size() << endl;
+    if (info) {
+        cerr << "Number of points for star 1 (fine) = " << star1f.size() << endl;
+    }
 
     set_star_grid(mdl, Roche::SECONDARY, true, star2f);
-    if (info) cerr << "Number of points for star 2 (fine) = " << star2f.size() << endl;
+    if (info) {
+        cerr << "Number of points for star 2 (fine) = " << star2f.size() << endl;
+    }
 
     set_star_continuum(mdl, star1f, star2f);
 
@@ -79,9 +83,10 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     } else {
         set_star_grid(mdl, Roche::PRIMARY, false, star1c);
     }
-    if (info)
+    if (info) {
         cerr << "Number of points for star 1 (coarse) = "
-                << star1c.size() << endl;
+             << star1c.size() << endl;
+    }
 
     bool copy2 = (mdl.nlat2f == mdl.nlat2c) &&
                  (!mdl.npole || r1 >= r2 || (mdl.nlatfill == 0 && mdl.nlngfill == 0));
@@ -92,9 +97,10 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     } else {
         set_star_grid(mdl, Roche::SECONDARY, false, star2c);
     }
-    if (info)
+    if (info) {
         cerr << "Number of points for star 2 (coarse) = "
-                << star2c.size() << endl;
+             << star2c.size() << endl;
+    }
 
     if (mdl.nlat1c != mdl.nlat1f || !copy2)
         set_star_continuum(mdl, star1c, star2c);
@@ -146,9 +152,10 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
         Lcurve::set_disc_grid(mdl, disc);
         Lcurve::set_disc_edge(mdl, true, edge, false);
 
-        if (info)
+        if (info) {
             cerr << "Number of points for the disc = " << disc.size()
-                    << endl;
+                 << endl;
+        }
 
         // note that the inner radius of the disc is set equal to that of the
         // white dwarf if rdisc1 <= 0 while the outer disc is set equal to the

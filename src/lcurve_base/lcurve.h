@@ -248,12 +248,6 @@ namespace Lcurve {
      * taken to be spherical. Star 2 can be tidally distorted.
      */
     //! Model structure
-/**
- * Defines the model to be used and which parameters are to be
- * varied in the fit. The order of the parameters defines the order
- * expected by minimisation routines (e.g., amoeba). Star 1 is
- * assumed spherical; Star 2 can be tidally distorted.
- */
     struct Model {
         // Constructors and public methods
         Model(json config);
@@ -269,6 +263,8 @@ namespace Lcurve {
         Subs::Array1D<double> get_range() const;
 
         Subs::Array1D<double> get_dstep() const;
+
+        vector<pair<double, double>> get_limit() const;
 
         void wrasc(const string &file) const;
 

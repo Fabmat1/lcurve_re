@@ -1283,6 +1283,131 @@ namespace Lcurve {
         return temp;
     }
 
+    vector<pair<double, double>> Lcurve::Model::get_limit() const {
+        vector<pair<double, double>> temp;
+
+        if(q.vary) temp.emplace_back(0.01, 1);
+        if(iangle.vary) temp.emplace_back(0, 90);
+        if(use_radii){
+            if(r1.vary)     temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(r2.vary)     temp.emplace_back(0, numeric_limits<double>::infinity());
+        }else{
+            if(cphi3.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(cphi4.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+        }
+        if(spin1.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(spin2.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(t1.vary)     temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(t2.vary)     temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc1_1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc1_2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc1_3.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc1_4.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc2_1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc2_2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc2_3.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(ldc2_4.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(velocity_scale.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(beam_factor1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(beam_factor2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(t0.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(period.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(pdot.vary) temp.emplace_back(-numeric_limits<double>::infinity(), numeric_limits<double>::infinity());
+        if(deltat.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(gravity_dark1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(gravity_dark2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(absorb.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(slope.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(quad.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(cube.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(third.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(add_disc){
+            if(rdisc1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(rdisc2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(height_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(beta_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(temp_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(texp_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(lin_limb_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(quad_limb_disc.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(temp_edge.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(absorb_edge.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        }
+
+        if(add_spot){
+            if(radius_spot.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(length_spot.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(height_spot.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(expon_spot.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(epow_spot.vary)   temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(angle_spot.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(yaw_spot.vary)    temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(temp_spot.vary)   temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(tilt_spot.vary)   temp.emplace_back(0, numeric_limits<double>::infinity());
+            if(cfrac_spot.vary)  temp.emplace_back(0, numeric_limits<double>::infinity());
+        }
+
+        if(stsp11_long.defined && stsp11_long.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp11_lat.defined && stsp11_lat.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp11_fwhm.defined && stsp11_fwhm.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp11_tcen.defined && stsp11_tcen.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(stsp12_long.defined && stsp12_long.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp12_lat.defined && stsp12_lat.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp12_fwhm.defined && stsp12_fwhm.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp12_tcen.defined && stsp12_tcen.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(stsp13_long.defined && stsp13_long.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp13_lat.defined && stsp13_lat.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp13_fwhm.defined && stsp13_fwhm.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp13_tcen.defined && stsp13_tcen.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(stsp21_long.defined && stsp21_long.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp21_lat.defined && stsp21_lat.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp21_fwhm.defined && stsp21_fwhm.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp21_tcen.defined && stsp21_tcen.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(stsp22_long.defined && stsp22_long.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp22_lat.defined && stsp22_lat.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp22_fwhm.defined && stsp22_fwhm.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(stsp22_tcen.defined && stsp22_tcen.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        if(uesp_long1.defined && uesp_long1.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(uesp_long2.defined && uesp_long2.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(uesp_lathw.defined && uesp_lathw.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(uesp_taper.defined && uesp_taper.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(uesp_temp.defined && uesp_temp.vary)
+            temp.emplace_back(0, numeric_limits<double>::infinity());
+
+        return temp;
+    }
+
 
     Subs::Array1D<double> Lcurve::Model::get_range() const {
 

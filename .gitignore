@@ -1,2 +1,9 @@
 .idea/
 cmake-build-debug/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+libutilities.a
+lcurve_mcmc
+output.txt

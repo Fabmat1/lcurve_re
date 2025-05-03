@@ -84,11 +84,15 @@ set(SOURCES
 add_library(utilities STATIC ${SOURCES})
 
 add_executable(lcurve_re main.cpp)
+add_executable(lcurve_mcmc ./src/new_scripts/mcmc_solver.cpp)
 
 target_link_libraries(lcurve_re PRIVATE utilities)
+target_link_libraries(lcurve_mcmc PRIVATE utilities)
 
 # Find and link nlohmann_json (header-only, no linking needed, just include path)
 find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(lcurve_re PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(lcurve_mcmc PRIVATE nlohmann_json::nlohmann_json)
 
 target_link_libraries(lcurve_re PRIVATE Boost::filesystem Boost::iostreams)
+target_link_libraries(lcurve_mcmc PRIVATE Boost::filesystem Boost::iostreams)

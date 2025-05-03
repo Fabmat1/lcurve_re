@@ -163,3 +163,13 @@ double Subs::dlpdlt(double wave, double temp){
     return efac/(1.-exp(-efac));
 }
 
+double Subs::gauss2(int seed){
+    // Set up random engine with the provided seed
+    std::mt19937 generator(seed);
+
+// Define a Gaussian distribution with mean 0 and standard deviation 1
+    std::normal_distribution<double> distribution(0.0, 1.0);
+
+// Generate a random sample from the Gaussian distribution
+    return distribution(generator);
+}

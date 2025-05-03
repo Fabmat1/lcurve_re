@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <fstream>
+#include <random>
 
 using namespace std;
 
@@ -177,6 +178,8 @@ namespace Subs {
 
         virtual ~Sfunc() = default;
     };
+
+    double gauss2(int seed);
 
     //! 1D minimisation routine without derivatives
     double brent(double xstart, double x1, double x2, Sfunc& f, double tol, double& xmin);
