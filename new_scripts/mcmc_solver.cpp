@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
 
     // Define Gnuplot instance
     Gnuplot gp; // Open once, reuse
-    gp << "set terminal " + device + "title 'Live fitting plot'\n";  // no 'persist'
+    gp << "set terminal " + device + " title 'Live fitting plot'\n";  // no 'persist'
     gp << "set grid\n";
 
     cout << "Calculating MCMC for " << npar << " parameters:" << endl;

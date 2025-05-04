@@ -30,8 +30,8 @@ vector<double> nelder_mead(function<double(const vector<double>&)> f,
                            const vector<double> &x0,
                            const vector<double> &step,
                            const vector<pair<double,double>> &limits,
-                           int max_iter = 200,
-                           double tol = 1e-6) {
+                           int max_iter = 999999,
+                           double tol = 5e-5) {
     int n = x0.size();
     int simplex_size = n + 1;
     vector<vector<double>> simplex(simplex_size, x0);
@@ -45,6 +45,10 @@ vector<double> nelder_mead(function<double(const vector<double>&)> f,
     for (int i = 0; i < simplex_size; ++i) fvals[i] = f(simplex[i]);
 
     for (int iter = 0; iter < max_iter; ++iter) {
+        if (iter % 10 == 0) {
+            cout << "Iteration " << iter << " ";
+            cout << " Weighted Chi^2 = " << accumulate(fvals.begin(), fvals.end(), 0.0)/n << endl;
+        };
         // sort by fvals
         vector<int> idx(simplex_size);
         iota(idx.begin(), idx.end(), 0);
