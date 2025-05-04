@@ -51,6 +51,11 @@ int main(int argc, char* argv[]) {
     Subs::Array1D<double> dsteps      = model.get_dstep();
     vector<pair<double, double>> limits = model.get_limit();
 
+    cout << "Calculating MCMC for " << npar << " parameters:" << endl;
+    for (int i = 0; i < npar; ++i) {
+        cout << names[i] << ": " << current_pars[i] << " with stepsize " << dsteps[i] << " and limits from " << limits[i].first << " to " << limits[i].second << endl;
+    }
+
     // MCMC settings
     int nsteps            = config.value("mcmc_steps", 25000);
     int burn_in           = config.value("mcmc_burn_in", nsteps/25);
