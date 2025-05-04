@@ -9,9 +9,9 @@
 #include <vector>
 #include <chrono>
 #include <nlohmann/json.hpp>
-#include "../lcurve_base/lcurve.h"
-#include "../new_helpers.h"
-#include "../new_subs.h"
+#include "../src/lcurve_base/lcurve.h"
+#include "../src/new_helpers.h"
+#include "../src/new_subs.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -52,9 +52,9 @@ int main(int argc, char* argv[]) {
     vector<pair<double, double>> limits = model.get_limit();
 
     // MCMC settings
-    int nsteps            = config.value("mcmc_steps", 10000);
-    int burn_in           = config.value("mcmc_burn_in", nsteps/10);
-    int progress_interval = config.value("progress_interval", 100);
+    int nsteps            = config.value("mcmc_steps", 25000);
+    int burn_in           = config.value("mcmc_burn_in", nsteps/25);
+    int progress_interval = config.value("progress_interval", 50);
     int bar_width         = config.value("progress_bar_width", 50);
 
     // RNG
@@ -74,8 +74,7 @@ int main(int argc, char* argv[]) {
 
     // Prepare in-memory chain storage
     struct ChainEntry { int step; Subs::Array1D<double> pars; double chisq; };
-    vector<ChainEntry> chain;
-    chain.reserve(config.value("mcmc_steps", 10000) - config.value("mcmc_burn_in", 1000));
+    vector<ChainEntry> chain(nsteps - burn_in);
 
     // Timing
     auto t_start = Clock::now();
@@ -140,7 +139,7 @@ int main(int argc, char* argv[]) {
 
         // Store post-burn-in entries in memory
         if (step >= burn_in) {
-            chain.push_back({step, current_pars, current_chisq});
+            chain[step-burn_in] = ChainEntry({step-burn_in, current_pars, current_chisq});
         }
     }
 

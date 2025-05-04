@@ -7,3 +7,4 @@ Makefile
 libutilities.a
 lcurve_mcmc
 output.txt
+chain_out.txt

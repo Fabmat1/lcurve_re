@@ -84,7 +84,7 @@ set(SOURCES
 add_library(utilities STATIC ${SOURCES})
 
 add_executable(lcurve_re main.cpp)
-add_executable(lcurve_mcmc ./src/new_scripts/mcmc_solver.cpp)
+add_executable(lcurve_mcmc new_scripts/mcmc_solver.cpp)
 
 target_link_libraries(lcurve_re PRIVATE utilities)
 target_link_libraries(lcurve_mcmc PRIVATE utilities)

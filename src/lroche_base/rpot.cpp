@@ -44,7 +44,8 @@ double Roche::rpot1(double q, double spin, const Subs::Vec3& p){
   comp = 1.-mu;
   x2y2 = Subs::sqr(p.x()) + Subs::sqr(p.y());
   z2   = Subs::sqr(p.z());
-  r1   = sqrt(r1sq = x2y2+z2);
+  r1sq = x2y2 + z2;
+  r1 = sqrt(r1sq);
   r2   = sqrt(r1sq + 1. - 2.*p.x());
   return (-comp/r1-mu/r2-Subs::sqr(spin)*x2y2/2.+mu*p.x());
 }
