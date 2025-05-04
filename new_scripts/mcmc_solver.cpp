@@ -48,6 +48,12 @@ int main(int argc, char* argv[]) {
     Subs::Array1D<double> current_pars = model.get_param();
     Subs::Array1D<double> dsteps      = model.get_dstep();
     vector<pair<double, double>> limits = model.get_limit();
+    string device = config.value("plot_device", "none");
+
+    // Define Gnuplot instance
+    Gnuplot gp; // Open once, reuse
+    gp << "set terminal " + device + "title 'Live fitting plot'\n";  // no 'persist'
+    gp << "set grid\n";
 
     cout << "Calculating MCMC for " << npar << " parameters:" << endl;
     for (int i = 0; i < npar; ++i) {
@@ -184,6 +190,10 @@ int main(int argc, char* argv[]) {
             }
             chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
         }
+
+        if (step % progress_interval == 0) {
+            Helpers::plot_model_live(data, fitp, no_file, copy, gp);
+        }
     }
 
     // Finish bar
@@ -216,7 +226,6 @@ int main(int argc, char* argv[]) {
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20);
-    string device = config.value("plot_device", "none");
     if (device != "none" && device != "null") Helpers::plot_model(data, best_fit, no_file, copy, device);
 
     // Write output file

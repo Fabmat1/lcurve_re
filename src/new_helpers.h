@@ -128,6 +128,101 @@ namespace Helpers {
         gp << "unset multiplot\n";
     }
 
+    void plot_model_live(Lcurve::Data data, Subs::Array1D<double> fit, bool no_file,
+                         Lcurve::Data copy, Gnuplot& gp) {
+        // X-bounds and centering
+        double x1 = data[0].time, x2 = data[0].time;
+        for (size_t i = 1; i < data.size(); ++i) {
+            x1 = min(x1, data[i].time);
+            x2 = max(x2, data[i].time);
+        }
+        double con = 0.0;
+        if (x2 - x1 < 0.01 * abs((x1 + x2) / 2.0)) {
+            con = x1;
+            x1 -= con;
+            x2 -= con;
+        }
+        double xr = x2 - x1;
+        x1 -= xr / 10.0;
+        x2 += xr / 10.0;
+
+        // Build datasets
+        vector<pair<double, double>> model_line, obs_pts, resid_pts;
+        vector<tuple<double, double, double>> obs_err, resid_err;
+        double fy1 = 0, fy2 = 0, r1 = 0, r2 = 0;
+        bool first_flux = true, first_resid = true;
+
+        for (size_t i = 0; i < data.size(); ++i) {
+            double t = data[i].time - con;
+            double m = fit[i];
+            double d = data[i].flux;
+            double s = (!no_file ? copy[i].ferr : data[i].ferr);
+            if (s <= 0) s = 1e-3;
+
+            model_line.emplace_back(t, m);
+            obs_err.emplace_back(t, d, s);
+            obs_pts.emplace_back(t, d);
+
+            double chi = (d - m) / s;
+            resid_err.emplace_back(t, chi, 1.0);
+            resid_pts.emplace_back(t, chi);
+
+            double fmin = min(d - s, m), fmax = max(d + s, m);
+            if (first_flux) {
+                fy1 = fmin; fy2 = fmax; first_flux = false;
+            } else {
+                fy1 = min(fy1, fmin); fy2 = max(fy2, fmax);
+            }
+
+            double rmin = chi - 1.0, rmax = chi + 1.0;
+            if (first_resid) {
+                r1 = rmin; r2 = rmax; first_resid = false;
+            } else {
+                r1 = min(r1, rmin); r2 = max(r2, rmax);
+            }
+        }
+
+        double dflux = fy2 - fy1;
+        if (dflux == 0) dflux = 1.0;
+        fy1 -= 0.1 * dflux;
+        fy2 += 0.1 * dflux;
+
+        double dr = r2 - r1;
+        if (dr == 0) dr = 1.0;
+        r1 -= 0.1 * dr;
+        r2 += 0.1 * dr;
+
+        // Redraw
+        gp << "clear\n";
+        gp << "set multiplot layout 2,1 rowsfirst\n";
+
+        gp << "set xlabel 'Time (phased)'\n"
+           << "set ylabel 'Flux'\n"
+           << "set xrange [" << x1 << ":" << x2 << "]\n"
+           << "set yrange [" << fy1 << ":" << fy2 << "]\n"
+           << "plot "
+              "'-' with lines      lc rgb 'blue'  title 'Model', "
+              "'-' with yerrorbars lc rgb 'red'   title 'Data err', "
+              "'-' with points      lc rgb 'red'   pt 7    title 'Data'\n";
+        gp.send1d(model_line);
+        gp.send1d(obs_err);
+        gp.send1d(obs_pts);
+
+        gp << "set xlabel 'Time (phased)'\n"
+           << "set ylabel 'Residual (χ)'\n"
+           << "set xrange [" << x1 << ":" << x2 << "]\n"
+           << "set yrange [" << r1 << ":" << r2 << "]\n"
+           << "plot "
+              "'-' with yerrorbars lc rgb 'purple' title 'χ ±1', "
+              "'-' with points      lc rgb 'black'  pt 7    title 'χ', "
+              "0 with lines         lc rgb 'gray'         title ''\n";
+        gp.send1d(resid_err);
+        gp.send1d(resid_pts);
+
+        gp << "unset multiplot\n";
+        gp.flush();
+    }
+
     pair<Lcurve::Model, json> load_model_and_config_from_json(string config_file){
         ifstream config_stream(config_file);
         if (!config_stream) {

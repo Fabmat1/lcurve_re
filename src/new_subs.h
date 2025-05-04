@@ -1441,6 +1441,8 @@ namespace Subs {
             s >> (*this)[i];
     }
 
+    //! Simplex minimisation routine
+    void amoeba(std::vector<std::pair<Array1D<double>, double> >& params, double ftol, int nmax, Afunc& func, int& nfunc);
 };
 
 #endif //NEW_SUBS_H
