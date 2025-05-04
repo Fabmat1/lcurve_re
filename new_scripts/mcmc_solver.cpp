@@ -129,7 +129,7 @@ int main(int argc, char* argv[]) {
                                      fitp, wdp, chp, wnp,
                                      lg1p, lg2p, rv1p, rv2p);
         }
-        catch Lcurve::Lcurve_Error &e {
+        catch (Lcurve::Lcurve_Error &e) {
             model.set_param(current_pars);
             // Store post-burn-in entries in memory
             if (step >= burn_in) {
