@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
 
             cout << "\r[";
             for (int i = 0; i < bar_width; ++i) cout << (i < pos ? "█" : " ");
-            if (acc_rate > 0) {
+            if (acc_rate >= 0) {
                 cout << "] " << int(fraction*100) << "% "
                      << "Acc " <<  int(acc_rate)  << "% "
                      << "ETA " << eta_str;
