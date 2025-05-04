@@ -57,8 +57,8 @@ int main(int argc, char* argv[]) {
     }
 
     // MCMC settings
-    int nsteps            = config.value("mcmc_steps", 25000);
-    int burn_in           = config.value("mcmc_burn_in", nsteps/25);
+    int nsteps            = config.value("mcmc_steps", 1000);
+    int burn_in           = config.value("mcmc_burn_in", nsteps/4);
     int progress_interval = config.value("progress_interval", 50);
     int bar_width         = config.value("progress_bar_width", 50);
 
@@ -124,9 +124,19 @@ int main(int argc, char* argv[]) {
         // Evaluate
         Subs::Array1D<double> fitp;
         double wdp, chp, wnp, lg1p, lg2p, rv1p, rv2p;
-        Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
-                                 fitp, wdp, chp, wnp,
-                                 lg1p, lg2p, rv1p, rv2p);
+        try {
+            Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
+                                     fitp, wdp, chp, wnp,
+                                     lg1p, lg2p, rv1p, rv2p);
+        }
+        except Lcurve::Lcurve_Error &e {
+            model.set_param(current_pars);
+            // Store post-burn-in entries in memory
+            if (step >= burn_in) {
+                chain[step-burn_in] = ChainEntry({step-burn_in, current_pars, current_chisq});
+            }
+            continue;
+        };
 
         // Accept/reject
         double alpha = exp(-(chp - current_chisq)/2.0);
