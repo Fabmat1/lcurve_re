@@ -1317,7 +1317,7 @@ namespace Lcurve {
         if(deltat.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(gravity_dark1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(gravity_dark2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
-        if(absorb.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(absorb.vary) temp.emplace_back(0, 1);
         if(slope.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(quad.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(cube.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
