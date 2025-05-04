@@ -1,12 +1,10 @@
-// fit_mcmc.cpp
-// Uses Metropolis–Hastings MCMC to optimize light‐curve model parameters
-
 #include <iostream>
 #include <fstream>
 #include <random>
 #include <string>
 #include <cmath>
 #include <vector>
+#include <deque>
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include "../src/lcurve_base/lcurve.h"
@@ -53,7 +51,10 @@ int main(int argc, char* argv[]) {
 
     cout << "Calculating MCMC for " << npar << " parameters:" << endl;
     for (int i = 0; i < npar; ++i) {
-        cout << names[i] << ": " << current_pars[i] << " with stepsize " << dsteps[i] << " and limits from " << limits[i].first << " to " << limits[i].second << endl;
+        cout << names[i] << ": " << current_pars[i]
+             << " with stepsize " << dsteps[i]
+             << " and limits from " << limits[i].first
+             << " to " << limits[i].second << endl;
     }
 
     // MCMC settings
@@ -61,6 +62,12 @@ int main(int argc, char* argv[]) {
     int burn_in           = config.value("mcmc_burn_in", nsteps/4);
     int progress_interval = config.value("progress_interval", 50);
     int bar_width         = config.value("progress_bar_width", 50);
+
+    // prepare sliding-window acceptance-rate over last 10% of post-burn-in
+    int post_len = nsteps - burn_in;
+    int window_size = max(1, int(post_len * 0.1));    // last 10%
+    deque<bool> acc_window;
+    int window_accept_count = 0;
 
     // RNG
     mt19937 rng(seed);
@@ -103,12 +110,26 @@ int main(int argc, char* argv[]) {
             if (h > 0) eta_str = to_string(h) + "h " + to_string(m) + "m " + to_string(s) + "s";
             else if (m > 0) eta_str = to_string(m) + "m " + to_string(s) + "s";
             else eta_str = to_string(s) + "s";
-            double acc_rate = step > 0 ? double(accepted) / step * 100.0 : 0.0;
+
+            // compute acceptance rate over sliding window
+            double acc_rate = 0.0;
+            if (!acc_window.empty()) {
+                acc_rate = double(window_accept_count) / acc_window.size() * 100.0;
+            }
+            else acc_rate = -10.0;
+
             cout << "\r[";
             for (int i = 0; i < bar_width; ++i) cout << (i < pos ? "█" : " ");
-            cout << "] " << int(fraction*100) << "% "
-                 << "Acc " << int(acc_rate) << "% "
-                 << "ETA " << eta_str;
+            if (acc_rate > 0) {
+                cout << "] " << int(fraction*100) << "% "
+                     << "Acc " <<  int(acc_rate)  << "% "
+                     << "ETA " << eta_str;
+            }
+            else {
+                cout << "] " << int(fraction*100) << "% "
+                     << "Acc not available during burn-in! "
+                     << "ETA " << eta_str;
+            }
             cout.flush();
         }
 
@@ -131,19 +152,20 @@ int main(int argc, char* argv[]) {
         }
         catch (Lcurve::Lcurve_Error &e) {
             model.set_param(current_pars);
-            // Store post-burn-in entries in memory
             if (step >= burn_in) {
-                chain[step-burn_in] = ChainEntry({step-burn_in, current_pars, current_chisq});
+                chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
             }
             continue;
         };
 
         // Accept/reject
+        bool this_accept = false;
         double alpha = exp(-(chp - current_chisq)/2.0);
         if (alpha >= 1.0 || uni(rng) < alpha) {
             current_pars = prop;
             current_chisq = chp;
             ++accepted;
+            this_accept = true;
             if (chp < best_chisq) {
                 best_chisq = chp;
                 best_pars   = prop;
@@ -152,9 +174,15 @@ int main(int argc, char* argv[]) {
             model.set_param(current_pars);
         }
 
-        // Store post-burn-in entries in memory
+        // sliding-window update & chain storage
         if (step >= burn_in) {
-            chain[step-burn_in] = ChainEntry({step-burn_in, current_pars, current_chisq});
+            acc_window.push_back(this_accept);
+            if (this_accept) ++window_accept_count;
+            if (int(acc_window.size()) > window_size) {
+                if (acc_window.front()) --window_accept_count;
+                acc_window.pop_front();
+            }
+            chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
         }
     }
 
@@ -170,7 +198,7 @@ int main(int argc, char* argv[]) {
     cout << "Best chi^2 = " << best_chisq << endl;
     for (int i = 0; i < npar; ++i) cout << names[i] << " = " << best_pars[i] << endl;
 
-    // Write chain to file at once
+    // Write chain to file
     ofstream chain_file("chain_out.txt");
     chain_file << "step";
     for (auto &n : names) chain_file << "," << n;
@@ -182,18 +210,16 @@ int main(int argc, char* argv[]) {
     }
     chain_file.close();
 
-    // Best-fit light curve
+    // Best-fit light curve & plot etc.
     Subs::Array1D<double> best_fit;
     model.set_param(best_pars);
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20);
-
-    // Plot
     string device = config.value("plot_device", "none");
     if (device != "none" && device != "null") Helpers::plot_model(data, best_fit, no_file, copy, device);
 
-    // Write
+    // Write output file
     string sout = config["output_file_path"].get<string>();
     for (int i = 0; i < data.size(); ++i) data[i].flux = best_fit[i] + noise * Subs::gauss2(seed);
     Helpers::write_data(data, sout);
