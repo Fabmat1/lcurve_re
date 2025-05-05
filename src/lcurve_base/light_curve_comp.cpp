@@ -335,8 +335,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             for (size_t i = 0; i < data.size(); i++) {
                 if (data[i].weight > 0.) {
                     wnok += data[i].weight;
-                    chisq += data[i].weight * ((data[i].flux -
-                    calc[i]) / data[i].ferr)*((data[i].flux -
+                    chisq += data[i].weight * Subs::sqr((data[i].flux -
                     calc[i]) / data[i].ferr);
                 }
             }
@@ -364,8 +363,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             for (size_t i = 0; i < data.size(); i++) {
                 if (data[i].weight > 0.) {
                     wnok += data[i].weight;
-                    chisq += data[i].weight * ((data[i].flux -
-                    calc[i]) / data[i].ferr)*((data[i].flux -
+                    chisq += data[i].weight * Subs::sqr((data[i].flux -
                     calc[i]) / data[i].ferr);
                 }
             }

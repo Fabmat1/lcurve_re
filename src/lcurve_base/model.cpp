@@ -1311,7 +1311,7 @@ namespace Lcurve {
         if(beam_factor1.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(beam_factor2.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
 
-        if(t0.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
+        if(t0.vary) temp.emplace_back(-numeric_limits<double>::infinity(), numeric_limits<double>::infinity());
         if(period.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
         if(pdot.vary) temp.emplace_back(-numeric_limits<double>::infinity(), numeric_limits<double>::infinity());
         if(deltat.vary) temp.emplace_back(0, numeric_limits<double>::infinity());
