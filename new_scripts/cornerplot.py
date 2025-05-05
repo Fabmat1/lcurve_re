@@ -14,8 +14,15 @@ def plot_chain_corner(filename):
     # Extract parameter data
     param_data = df[param_columns]
 
-    # Create corner plot
-    fig = corner.corner(param_data, labels=param_columns, show_titles=True)
+    # Create corner plot with dots only, no contours
+    fig = corner.corner(
+        param_data,
+        labels=param_columns,
+        show_titles=True,
+        plot_contours=False,     # Disable contour plots
+        fill_contours=False,     # Also ensure filled contours are off
+        plot_density=False       # Disable density shading
+    )
     plt.show()
 
 if __name__ == "__main__":
