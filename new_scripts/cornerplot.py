@@ -9,19 +9,19 @@ def plot_chain_corner(filename):
 
     # Exclude metadata columns that are not parameters
     exclude_columns = {"step", "chisq"}
-    param_columns = [col for col in df.columns if col not in exclude_columns]
+    param_data = df.loc[:, ~df.columns.isin(exclude_columns)]
 
-    # Extract parameter data
-    param_data = df[param_columns]
+    # Extract labels from actual DataFrame to preserve correct order
+    labels = param_data.columns.tolist()
 
-    # Create corner plot with dots only, no contours
+    # Create corner plot with only scatter points
     fig = corner.corner(
-        param_data,
-        labels=param_columns,
+        param_data.values,  # Pass raw values to avoid label mismatch
+        labels=labels,
         show_titles=True,
-        plot_contours=False,     # Disable contour plots
-        fill_contours=False,     # Also ensure filled contours are off
-        plot_density=False       # Disable density shading
+        plot_contours=True,
+        fill_contours=False,
+        plot_density=True
     )
     plt.show()
 

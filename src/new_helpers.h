@@ -8,13 +8,18 @@
 #include "lcurve_base/lcurve.h"
 #include "gnuplot-iostream.h"
 
+#include "lcurve_base/constants.h"
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 using namespace std;
 
 namespace Helpers {
-    void plot_model(Lcurve::Data data, Subs::Array1D<double> fit, bool no_file, Lcurve::Data copy, const string &device) {
-        // 1) X‐bounds + centering
+    void plot_model(Lcurve::Data data,
+                    Subs::Array1D<double> fit,
+                    bool no_file,
+                    Lcurve::Data copy,
+                    const string &device) {
+        // 1) Compute x‐bounds and centering
         double x1 = data[0].time, x2 = data[0].time;
         for (size_t i = 1; i < data.size(); ++i) {
             x1 = min(x1, data[i].time);
@@ -30,34 +35,29 @@ namespace Helpers {
         x1 -= xr / 10.0;
         x2 += xr / 10.0;
 
-        // 2) Build datasets, track flux‐ and residual‐ranges
-        vector<pair<double, double>> model_line, obs_pts, resid_pts;
-        vector<tuple<double, double, double>> obs_err, resid_err;
+        // 2) Build datasets and track ranges
+        vector<pair<double, double> > model_line, obs_pts, resid_pts;
+        vector<tuple<double, double, double> > obs_err, resid_err;
 
         double fy1 = 0, fy2 = 0, r1 = 0, r2 = 0;
         bool first_flux = true, first_resid = true;
 
         for (size_t i = 0; i < data.size(); ++i) {
             double t = data[i].time - con;
-            double m = fit[i];               // model
-            double d = data[i].flux;         // noisy data
-            // Pull original σ from copy (saved before you scaled data)
+            double m = fit[i];
+            double d = data[i].flux;
             double s = (!no_file ? copy[i].ferr : data[i].ferr);
-            if (s <= 0) s = 1e-3;              // tiny fallback, shouldn't happen
+            if (s <= 0) s = 1e-3;
 
-            // model line
             model_line.emplace_back(t, m);
-
-            // data
             obs_err.emplace_back(t, d, s);
             obs_pts.emplace_back(t, d);
 
-            // residual χ = (d – m)/σ
             double chi = (d - m) / s;
             resid_err.emplace_back(t, chi, 1.0);
             resid_pts.emplace_back(t, chi);
 
-            // track flux‐range including error‐bars and model
+            // flux range
             double fmin = min(d - s, m);
             double fmax = max(d + s, m);
             if (first_flux) {
@@ -68,8 +68,7 @@ namespace Helpers {
                 fy1 = min(fy1, fmin);
                 fy2 = max(fy2, fmax);
             }
-
-            // track residual‐range including ±1
+            // residual range
             double rmin = chi - 1.0, rmax = chi + 1.0;
             if (first_resid) {
                 r1 = rmin;
@@ -80,7 +79,6 @@ namespace Helpers {
                 r2 = max(r2, rmax);
             }
         }
-
         // pad ranges by 10%
         double dflux = fy2 - fy1;
         if (dflux == 0) dflux = 1.0;
@@ -100,37 +98,53 @@ namespace Helpers {
 
         gp << "set multiplot layout 2,1 rowsfirst\n";
 
-        // Top panel: Model line + Data errorbars + Data points
-        gp << "set xlabel 'Time (phased)'\n"
-           << "set ylabel 'Flux'\n"
-           << "set xrange [" << x1 << ":" << x2 << "]\n"
-           << "set yrange [" << fy1 << ":" << fy2 << "]\n"
-           << "plot "
-              "'-' with lines      lc rgb 'blue'  title 'Model', "
-              "'-' with yerrorbars lc rgb 'red'   title 'Data err', "
-              "'-' with points      lc rgb 'red'   pt 7    title 'Data'\n";
+        // --- send named datablocks ---
+        gp << "$Model << EOD\n";
         gp.send1d(model_line);
+        gp << "EOD\n";
+        gp << "$ObsErr << EOD\n";
         gp.send1d(obs_err);
+        gp << "EOD\n";
+        gp << "$ObsPts << EOD\n";
         gp.send1d(obs_pts);
-
-        // Bottom panel: Residuals χ ±1 + residual points + zero‐line
-        gp << "set xlabel 'Time (phased)'\n"
-           << "set ylabel 'Residual (χ)'\n"
-           << "set xrange [" << x1 << ":" << x2 << "]\n"
-           << "set yrange [" << r1 << ":" << r2 << "]\n"
-           << "plot "
-              "'-' with yerrorbars lc rgb 'purple' title 'χ ±1', "
-              "'-' with points      lc rgb 'black'  pt 7    title 'χ', "
-              "0 with lines         lc rgb 'gray'         title ''\n";
+        gp << "EOD\n";
+        gp << "$ResErr << EOD\n";
         gp.send1d(resid_err);
+        gp << "EOD\n";
+        gp << "$ResPts << EOD\n";
         gp.send1d(resid_pts);
+        gp << "EOD\n";
+
+        // Top panel: Flux
+        gp << "set xlabel 'Time (phased)'\n"
+                << "set ylabel 'Flux'\n"
+                << "set xrange [" << x1 << ":" << x2 << "]\n"
+                << "set yrange [" << fy1 << ":" << fy2 << "]\n"
+                << "plot "
+                "$Model    with lines      lc rgb 'blue'  title 'Model', "
+                "$ObsErr   with yerrorbars lc rgb 'red'   title 'Data err', "
+                "$ObsPts   with points      lc rgb 'red'   pt 7    title 'Data'\n";
+
+        // Bottom panel: Residuals
+        gp << "set xlabel 'Time (phased)'\n"
+                << "set ylabel 'Residual (χ)'\n"
+                << "set xrange [" << x1 << ":" << x2 << "]\n"
+                << "set yrange [" << r1 << ":" << r2 << "]\n"
+                << "plot "
+                "$ResErr   with yerrorbars lc rgb 'purple' title 'χ ±1', "
+                "$ResPts   with points      lc rgb 'black'  pt 7    title 'χ', "
+                "0         with lines         lc rgb 'gray'         title ''\n";
 
         gp << "unset multiplot\n";
     }
 
-    void plot_model_live(Lcurve::Data data, Subs::Array1D<double> fit, bool no_file,
-                         Lcurve::Data copy, Gnuplot& gp) {
-        // X-bounds and centering
+
+    void plot_model_live(Lcurve::Data data,
+                         Subs::Array1D<double> fit,
+                         bool no_file,
+                         Lcurve::Data copy,
+                         Gnuplot &gp) {
+        // 1) Compute x‐bounds and centering
         double x1 = data[0].time, x2 = data[0].time;
         for (size_t i = 1; i < data.size(); ++i) {
             x1 = min(x1, data[i].time);
@@ -146,9 +160,9 @@ namespace Helpers {
         x1 -= xr / 10.0;
         x2 += xr / 10.0;
 
-        // Build datasets
-        vector<pair<double, double>> model_line, obs_pts, resid_pts;
-        vector<tuple<double, double, double>> obs_err, resid_err;
+        // 2) Build datasets and track ranges
+        vector<pair<double, double> > model_line, obs_pts, resid_pts;
+        vector<tuple<double, double, double> > obs_err, resid_err;
         double fy1 = 0, fy2 = 0, r1 = 0, r2 = 0;
         bool first_flux = true, first_resid = true;
 
@@ -169,68 +183,84 @@ namespace Helpers {
 
             double fmin = min(d - s, m), fmax = max(d + s, m);
             if (first_flux) {
-                fy1 = fmin; fy2 = fmax; first_flux = false;
+                fy1 = fmin;
+                fy2 = fmax;
+                first_flux = false;
             } else {
-                fy1 = min(fy1, fmin); fy2 = max(fy2, fmax);
+                fy1 = min(fy1, fmin);
+                fy2 = max(fy2, fmax);
             }
 
             double rmin = chi - 1.0, rmax = chi + 1.0;
             if (first_resid) {
-                r1 = rmin; r2 = rmax; first_resid = false;
+                r1 = rmin;
+                r2 = rmax;
+                first_resid = false;
             } else {
-                r1 = min(r1, rmin); r2 = max(r2, rmax);
+                r1 = min(r1, rmin);
+                r2 = max(r2, rmax);
             }
         }
-
         double dflux = fy2 - fy1;
         if (dflux == 0) dflux = 1.0;
         fy1 -= 0.1 * dflux;
         fy2 += 0.1 * dflux;
-
         double dr = r2 - r1;
         if (dr == 0) dr = 1.0;
         r1 -= 0.1 * dr;
         r2 += 0.1 * dr;
 
-        // Redraw
-        gp << "clear\n";
-        gp << "set multiplot layout 2,1 rowsfirst\n";
+        // 3) Redraw in existing gp
+        gp << "clear\n"
+                << "set multiplot layout 2,1 rowsfirst\n";
 
-        gp << "set xlabel 'Time (phased)'\n"
-           << "set ylabel 'Flux'\n"
-           << "set xrange [" << x1 << ":" << x2 << "]\n"
-           << "set yrange [" << fy1 << ":" << fy2 << "]\n"
-           << "plot "
-              "'-' with lines      lc rgb 'blue'  title 'Model', "
-              "'-' with yerrorbars lc rgb 'red'   title 'Data err', "
-              "'-' with points      lc rgb 'red'   pt 7    title 'Data'\n";
+        // send blocks
+        gp << "$Model << EOD\n";
         gp.send1d(model_line);
+        gp << "EOD\n";
+        gp << "$ObsErr << EOD\n";
         gp.send1d(obs_err);
+        gp << "EOD\n";
+        gp << "$ObsPts << EOD\n";
         gp.send1d(obs_pts);
-
-        gp << "set xlabel 'Time (phased)'\n"
-           << "set ylabel 'Residual (χ)'\n"
-           << "set xrange [" << x1 << ":" << x2 << "]\n"
-           << "set yrange [" << r1 << ":" << r2 << "]\n"
-           << "plot "
-              "'-' with yerrorbars lc rgb 'purple' title 'χ ±1', "
-              "'-' with points      lc rgb 'black'  pt 7    title 'χ', "
-              "0 with lines         lc rgb 'gray'         title ''\n";
+        gp << "EOD\n";
+        gp << "$ResErr << EOD\n";
         gp.send1d(resid_err);
+        gp << "EOD\n";
+        gp << "$ResPts << EOD\n";
         gp.send1d(resid_pts);
+        gp << "EOD\n";
 
-        gp << "unset multiplot\n";
-        gp.flush();
+        // top
+        gp << "set xlabel 'Time (phased)'\n"
+                << "set ylabel 'Flux'\n"
+                << "set xrange [" << x1 << ":" << x2 << "]\n"
+                << "set yrange [" << fy1 << ":" << fy2 << "]\n"
+                << "plot $Model with lines lc rgb 'blue' title 'Model', "
+                "$ObsErr with yerrorbars lc rgb 'red' title 'Data err', "
+                "$ObsPts with points lc rgb 'red' pt 7 title 'Data'\n";
+
+        // bottom
+        gp << "set xlabel 'Time (phased)'\n"
+                << "set ylabel 'Residual (χ)'\n"
+                << "set xrange [" << x1 << ":" << x2 << "]\n"
+                << "set yrange [" << r1 << ":" << r2 << "]\n"
+                << "plot $ResErr with yerrorbars lc rgb 'purple' title 'χ ±1', "
+                "$ResPts with points lc rgb 'black' pt 7 title 'χ', "
+                "0 with lines lc rgb 'gray'\n";
+
+        gp << "unset multiplot\n"
+                << flush;
     }
 
-    pair<Lcurve::Model, json> load_model_and_config_from_json(string config_file){
+
+    pair<Lcurve::Model, json> load_model_and_config_from_json(string config_file) {
         ifstream config_stream(config_file);
         if (!config_stream) {
             throw runtime_error("Error: Unable to open configuration file: " + config_file);
         }
         json config;
-        try { config_stream >> config; }
-        catch (const json::parse_error &e) {
+        try { config_stream >> config; } catch (const json::parse_error &e) {
             throw runtime_error("JSON parse error: " + string(e.what()));
         }
 
@@ -239,22 +269,21 @@ namespace Helpers {
         return make_pair(model, config);
     }
 
-    pair<Lcurve::Data, Lcurve::Data> read_and_copy_lightcurve_from_file(string fpath){
+    pair<Lcurve::Data, Lcurve::Data> read_and_copy_lightcurve_from_file(string fpath) {
         bool no_file = (Subs::toupper(fpath) == "NONE");
         Lcurve::Data data, copy;
         if (!no_file) {
             data.rasc(fpath);
             if (data.empty()) throw runtime_error("No data read from file.");
             copy = data;
-        }
-        else {
+        } else {
             cout << "'None' specified as data path, returning empty arrays!" << endl;
             return make_pair(data, copy);
         }
         return make_pair(data, copy);
     }
 
-    Lcurve::Data generate_fake_data(json config){
+    Lcurve::Data generate_fake_data(json config) {
         double time1 = 0, time2 = 0, expose = 0, noise = 0;
         int ntime = 0, ndivide = 0;
 
@@ -274,14 +303,14 @@ namespace Helpers {
         return fake_data;
     }
 
-    void write_data(Lcurve::Data data_out, string out_path){
+    void write_data(Lcurve::Data data_out, string out_path) {
         // note: noise will already have been added
         data_out.wrasc(out_path);
         cout << "Written data to " << out_path << endl;
     }
 
-    void load_seed_scale_sfac(const json& config, bool no_file, const Lcurve::Model& model,
-                              int32_t& seed, bool& scale, Subs::Buffer1D<double>& sfac) {
+    void load_seed_scale_sfac(const json &config, bool no_file, const Lcurve::Model &model,
+                              int32_t &seed, bool &scale, Subs::Buffer1D<double> &sfac) {
         // Load seed and ensure it is negative
         seed = config["seed"].get<int32_t>();
         if (seed > 0) seed = -seed;
@@ -303,6 +332,88 @@ namespace Helpers {
         }
     }
 
+    inline double bisect(
+        const function<double(double)> &f,
+        double c_lo,
+        double c_hi,
+        double tol = 1e-9,
+        int max_iter = 100
+    ) {
+        double f_lo = f(c_lo), f_hi = f(c_hi);
+        if (f_lo * f_hi > 0)
+            throw runtime_error("Bisection requires f(c_lo) and f(c_hi) of opposite signs.");
+
+        double c_mid = 0, f_mid;
+        for (int i = 0; i < max_iter; ++i) {
+            c_mid = 0.5 * (c_lo + c_hi);
+            f_mid = f(c_mid);
+            if (abs(f_mid) < tol || 0.5 * (c_hi - c_lo) < tol)
+                return c_mid;
+            if (f_lo * f_mid <= 0) {
+                c_hi = c_mid;
+                f_hi = f_mid;
+            } else {
+                c_lo = c_mid;
+                f_lo = f_mid;
+            }
+        }
+        return c_mid; // may not converge fully
+    }
+
+    // Numerically computed mass ratio (Mass ratio errors are way too low to be relevant)
+    double mass_ratio_from_inclination(double inclination, double mass1, double min_mass2) {
+        // Precompute constant factor A = a^3/(a+b)^2
+        double A = pow(min_mass2, 3) / pow(min_mass2 + mass1, 2);
+
+        // Compute target = sin^3(k)
+        double inclination_rad = inclination * M_PI / 180.0;
+        double target = pow(sin(inclination_rad), 3);
+
+        // Define f(c) = A * (c+b)^2 / c^3 - target
+        auto f = [&](double c) {
+            return A * pow(c + mass1, 2) / pow(c, 3) - target;
+        };
+
+        // Pick a bracket [c_lo, c_hi] such that f(c_lo)*f(c_hi) < 0.
+        double c_lo = 1e-6;
+        double c_hi = 1e3;
+        double c_sol = 0.0;
+        try {
+            c_sol = bisect(f, c_lo, c_hi);
+        } catch (const exception &e) {
+            cerr << "Error: " << e.what() << "\n";
+        }
+
+        return c_sol / mass1;
+    }
+
+
+    double velocity_scale_from_inclination(double inclination, double rv_obs, double mass_ratio) {
+        return rv_obs / sin(inclination * M_PI / 180.0) * (mass_ratio + 1) / mass_ratio;
+    }
+
+    // Compute orbital separation in solar radii
+    double compute_scaled_r1(double r1, double velocity_scale, double P_days) {
+        // Convert to SI units
+        double P = P_days * Constants::IDAY;
+
+        // Convert to solar radii
+        return r1/(1000*velocity_scale*P / (Constants::RSUN*2*M_PI));
+    }
+
+    std::tuple<double, double, double> parseThreeDoubles(const std::string& input) {
+        std::istringstream iss(input);
+        double a, b, c;
+        if (!(iss >> a >> b >> c)) {
+            throw std::runtime_error("Input string does not contain exactly three double values.");
+        }
+        // Ensure no extra input
+        std::string leftover;
+        if (iss >> leftover) {
+            throw std::runtime_error("Input string contains more than three values.");
+        }
+        return std::make_tuple(a, b, c);
+    }
 }
 
 

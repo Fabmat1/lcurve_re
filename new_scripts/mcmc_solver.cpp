@@ -41,6 +41,9 @@ int main(int argc, char* argv[]) {
     Subs::Buffer1D<double> sfac;
     Helpers::load_seed_scale_sfac(config, no_file, model, seed, scale, sfac);
 
+    // Use Priors if available
+
+
     // Get variable parameters
     int npar = model.nvary();
     vector<string> names(npar);
@@ -64,7 +67,7 @@ int main(int argc, char* argv[]) {
     }
 
     // MCMC settings
-    int nsteps            = config.value("mcmc_steps", 1000);
+    int nsteps            = config.value("mcmc_steps", 25000);
     int burn_in           = config.value("mcmc_burn_in", nsteps/4);
     int progress_interval = config.value("progress_interval", 50);
     int bar_width         = config.value("progress_bar_width", 50);
@@ -97,6 +100,37 @@ int main(int argc, char* argv[]) {
     // Timing
     auto t_start = Clock::now();
     int accepted = 0;
+
+    tuple<double, double, double> vobs_prior;
+    tuple<double, double, double> m1_prior;
+    tuple<double, double, double> m2_min_prior;
+    tuple<double, double, double> r1_prior;
+    bool prior_warning_printed = false;
+
+    // Stuff related to priors
+    bool use_priors = config.value("use_priors", false);
+    if (use_priors) {
+        for (auto &[p, v] : config["priors"].items()) {
+            tuple<double, double, double> val_err_arr = Helpers::parseThreeDoubles(v.get<string>());
+            if (p == "vrad1_obs") {
+                vobs_prior = val_err_arr;
+            }
+            else if (p == "m1") {
+                m1_prior = val_err_arr;
+            }
+            else if (p == "m2_min") {
+                m2_min_prior = val_err_arr;
+            }
+            else if (p == "r1") {
+                r1_prior = val_err_arr;
+            }
+            else {
+                cerr << "Unknown prior: " << p << endl;
+                return 1;
+            }
+        }
+    }
+
 
     // MCMC
     for (int step = 0; step < nsteps; ++step) {
@@ -148,11 +182,144 @@ int main(int argc, char* argv[]) {
         }
         model.set_param(prop);
 
+        if (use_priors) {
+            double current_inclination;
+            if (model.iangle.vary) {
+                auto it = find(names.begin(), names.end(), "iangle");
+                int iangle_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
+                current_inclination = prop[iangle_idx];
+            }
+            else {
+                current_inclination = model.iangle.value;
+            }
+
+            double current_q;
+            // See if mass ratio is plausible
+            if (model.q.vary) {
+                double q_min = Helpers::mass_ratio_from_inclination(current_inclination,
+                    get<0>(m1_prior)+get<1>(m1_prior),
+                    get<0>(m2_min_prior)-get<2>(m2_min_prior));
+                double q_max = Helpers::mass_ratio_from_inclination(current_inclination,
+                    get<0>(m1_prior)-get<2>(m1_prior),
+                    get<0>(m2_min_prior)+get<1>(m2_min_prior));
+
+                auto it = find(names.begin(), names.end(), "q");
+                int q_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
+
+                if (prop[q_idx] < q_min || prop[q_idx] > q_max) {
+                    cout << "Proposed q is outside of mass ratio prior range, rejecting!" << endl;
+                    cout << "Proposed q = " << prop[q_idx] << endl;
+                    cout << "q_min = " << q_min << endl;
+                    cout << "q_max = " << q_max << endl;
+                    model.set_param(current_pars);
+
+                    if (step >= burn_in) {
+                        acc_window.push_back(false);
+                        if (int(acc_window.size()) > window_size) {
+                            if (acc_window.front()) --window_accept_count;
+                            acc_window.pop_front();
+                        }
+                        chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
+                    }
+                    continue;
+                }
+                else {
+                    current_q = prop[q_idx];
+                }
+            }
+            else {
+                if (not prior_warning_printed) {
+                    cout << "[WARNING] Priors are set but q is fixed, value may not be physically sensible!" << endl;
+                    prior_warning_printed = true;                
+                }
+                current_q = model.q.value;
+            }
+
+            double current_vscale;
+
+            // See if velocity scale is plausible
+            if (model.velocity_scale.vary) {
+                double vs_min = Helpers::velocity_scale_from_inclination(current_inclination,
+                    get<0>(vobs_prior)-get<2>(vobs_prior), current_q);
+                double vs_max = Helpers::velocity_scale_from_inclination(current_inclination,
+                    get<0>(vobs_prior)+get<1>(vobs_prior), current_q);
+
+                auto it = find(names.begin(), names.end(), "velocity_scale");
+                int vs_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
+
+                if (prop[vs_idx] < vs_min || prop[vs_idx] > vs_max) {
+                    cout << "Proposed velocity scale is outside of velocity scale prior range, rejecting!" << endl;
+                    cout << "Proposed velocity scale = " << prop[vs_idx] << endl;
+                    cout << "vs_min = " << vs_min << endl;
+                    cout << "vs_max = " << vs_max << endl;
+
+                    model.set_param(current_pars);
+
+                    if (step >= burn_in) {
+                        acc_window.push_back(false);
+                        if (int(acc_window.size()) > window_size) {
+                            if (acc_window.front())
+                                --window_accept_count;
+                            acc_window.pop_front();
+                        }
+                        chain[step - burn_in] = ChainEntry{step - burn_in, current_pars, current_chisq};
+                    }
+                    continue;
+                }
+                current_vscale = prop[vs_idx];
+            }
+            else {
+                if (not prior_warning_printed) {
+                    cout << "[WARNING] Priors are set but velocity scale is fixed, value may not be physically sensible!" << endl;
+                    prior_warning_printed = true;
+                }
+                current_vscale = model.velocity_scale.value;
+            }
+
+            // See if R1 is plausible
+            if (model.r1.vary) {
+                double true_period = config["true_period"].get<double>();
+                double r1_min = Helpers::compute_scaled_r1(get<0>(r1_prior)-get<2>(r1_prior), current_vscale, true_period);
+                double r1_max = Helpers::compute_scaled_r1(get<0>(r1_prior)+get<1>(r1_prior), current_vscale, true_period);
+
+                auto it = find(names.begin(), names.end(), "r1");
+                int r1_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
+
+                if (prop[r1_idx] < r1_min || prop[r1_idx] > r1_max) {
+                    cout << "Proposed R1 is outside of R1 prior range, rejecting!" << endl;
+                    cout << "Proposed R1 = " << prop[r1_idx] << endl;
+                    cout << "r1_min = " << r1_min << endl;
+                    cout << "r1_max = " << r1_max << endl;
+
+
+                    model.set_param(current_pars);
+
+                    if (step >= burn_in) {
+                        acc_window.push_back(false);
+                        if (int(acc_window.size()) > window_size) {
+                            if (acc_window.front())
+                                --window_accept_count;
+                            acc_window.pop_front();
+                        }
+                        chain[step - burn_in] = ChainEntry{step - burn_in, current_pars, current_chisq};
+                    }
+                    continue;
+                }
+            }
+            else {
+                if (not prior_warning_printed) {
+                    cout << "[WARNING] Priors are set but R1 is fixed, value may not be physically sensible!" << endl;
+                    prior_warning_printed = true;
+                }
+            }
+        }
+
+
         // Evaluate
         Subs::Array1D<double> fitp;
         double wdp, chp, wnp, lg1p, lg2p, rv1p, rv2p;
         try {
-            Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
+            light_curve_comp(model, data, scale, !no_file, false, sfac,
                                      fitp, wdp, chp, wnp,
                                      lg1p, lg2p, rv1p, rv2p);
         }
@@ -209,7 +376,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < npar; ++i) cout << names[i] << " = " << best_pars[i] << endl;
 
     // Write chain to file
-    ofstream chain_file("chain_out.txt");
+    ofstream chain_file(config.value("chain_out_path", "chain_out.txt"));
     chain_file << "step";
     for (auto &n : names) chain_file << "," << n;
     chain_file << ",chisq\n";

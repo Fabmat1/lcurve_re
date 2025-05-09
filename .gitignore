@@ -9,3 +9,15 @@ lcurve_mcmc
 output.txt
 chain_out.txt
 *perf*
+J0658
+workspace/
+.cmake/api/v1/reply/
+.cmake/api/v1/query/
+.ninja_deps
+.ninja_log
+.clang-format
+build.ninja
+Testing/Temporary/LastTest.log
+test
+lcurve_re
+simplex
