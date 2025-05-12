@@ -207,10 +207,13 @@ int main(int argc, char* argv[]) {
                 int q_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
 
                 if (prop[q_idx] < q_min || prop[q_idx] > q_max) {
-                    cout << "Proposed q is outside of mass ratio prior range, rejecting!" << endl;
-                    cout << "Proposed q = " << prop[q_idx] << endl;
-                    cout << "q_min = " << q_min << endl;
-                    cout << "q_max = " << q_max << endl;
+                    if (step < 50)
+                    {
+                        cout << "Proposed q is outside of mass ratio prior range, rejecting!" << endl;
+                        cout << "Proposed q = " << prop[q_idx] << endl;
+                        cout << "q_min = " << q_min << endl;
+                        cout << "q_max = " << q_max << endl;
+                    }
                     model.set_param(current_pars);
 
                     if (step >= burn_in) {
@@ -248,10 +251,13 @@ int main(int argc, char* argv[]) {
                 int vs_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
 
                 if (prop[vs_idx] < vs_min || prop[vs_idx] > vs_max) {
-                    cout << "Proposed velocity scale is outside of velocity scale prior range, rejecting!" << endl;
-                    cout << "Proposed velocity scale = " << prop[vs_idx] << endl;
-                    cout << "vs_min = " << vs_min << endl;
-                    cout << "vs_max = " << vs_max << endl;
+                    if (step < 50)
+                    {
+                        cout << "Proposed velocity scale is outside of velocity scale prior range, rejecting!" << endl;
+                        cout << "Proposed velocity scale = " << prop[vs_idx] << endl;
+                        cout << "vs_min = " << vs_min << endl;
+                        cout << "vs_max = " << vs_max << endl;
+                    }
 
                     model.set_param(current_pars);
 
@@ -286,10 +292,13 @@ int main(int argc, char* argv[]) {
                 int r1_idx = (it != names.end()) ? distance(names.begin(), it) : -1;
 
                 if (prop[r1_idx] < r1_min || prop[r1_idx] > r1_max) {
-                    cout << "Proposed R1 is outside of R1 prior range, rejecting!" << endl;
-                    cout << "Proposed R1 = " << prop[r1_idx] << endl;
-                    cout << "r1_min = " << r1_min << endl;
-                    cout << "r1_max = " << r1_max << endl;
+                    if (step < 50)
+                    {
+                        cout << "Proposed R1 is outside of R1 prior range, rejecting!" << endl;
+                        cout << "Proposed R1 = " << prop[r1_idx] << endl;
+                        cout << "r1_min = " << r1_min << endl;
+                        cout << "r1_max = " << r1_max << endl;
+                    }
 
 
                     model.set_param(current_pars);

@@ -1286,7 +1286,7 @@ namespace Lcurve {
     vector<pair<double, double>> Lcurve::Model::get_limit() const {
         vector<pair<double, double>> temp;
 
-        if(q.vary) temp.emplace_back(0.01, 2);
+        if(q.vary) temp.emplace_back(0.01, 100);
         if(iangle.vary) temp.emplace_back(0, 90);
         if(use_radii){
             if(r1.vary)     temp.emplace_back(0, numeric_limits<double>::infinity());
