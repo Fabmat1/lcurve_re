@@ -332,62 +332,6 @@ namespace Helpers {
         }
     }
 
-    inline double bisect(
-        const function<double(double)> &f,
-        double c_lo,
-        double c_hi,
-        double tol = 1e-9,
-        int max_iter = 100
-    ) {
-        double f_lo = f(c_lo), f_hi = f(c_hi);
-        if (f_lo * f_hi > 0)
-            throw runtime_error("Bisection requires f(c_lo) and f(c_hi) of opposite signs.");
-
-        double c_mid = 0, f_mid;
-        for (int i = 0; i < max_iter; ++i) {
-            c_mid = 0.5 * (c_lo + c_hi);
-            f_mid = f(c_mid);
-            if (abs(f_mid) < tol || 0.5 * (c_hi - c_lo) < tol)
-                return c_mid;
-            if (f_lo * f_mid <= 0) {
-                c_hi = c_mid;
-                f_hi = f_mid;
-            } else {
-                c_lo = c_mid;
-                f_lo = f_mid;
-            }
-        }
-        return c_mid; // may not converge fully
-    }
-
-    // Numerically computed mass ratio (Mass ratio errors are way too low to be relevant)
-    double mass_ratio_from_inclination(double inclination, double mass1, double min_mass2) {
-        // Precompute constant factor A = a^3/(a+b)^2
-        double A = pow(min_mass2, 3) / pow(min_mass2 + mass1, 2);
-
-        // Compute target = sin^3(k)
-        double inclination_rad = inclination * M_PI / 180.0;
-        double target = pow(sin(inclination_rad), 3);
-
-        // Define f(c) = A * (c+b)^2 / c^3 - target
-        auto f = [&](double c) {
-            return A * pow(c + mass1, 2) / pow(c, 3) - target;
-        };
-
-        // Pick a bracket [c_lo, c_hi] such that f(c_lo)*f(c_hi) < 0.
-        double c_lo = 1e-6;
-        double c_hi = 1e3;
-        double c_sol = 0.0;
-        try {
-            c_sol = bisect(f, c_lo, c_hi);
-        } catch (const exception &e) {
-            cerr << "Error: " << e.what() << "\n";
-        }
-
-        return c_sol / mass1;
-    }
-
-
     double velocity_scale_from_inclination(double inclination, double rv_obs, double mass_ratio) {
         return rv_obs / sin(inclination * M_PI / 180.0) * (mass_ratio + 1) / mass_ratio;
     }

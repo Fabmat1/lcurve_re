@@ -80,6 +80,8 @@ set(SOURCES
         src/lroche_base/rocacc.cpp
         src/lroche_base/fblink.cpp
         src/amoeba.cpp
+        src/mass_ratio_pdf.cpp
+        src/mass_ratio_pdf.h
 )
 
 add_library(utilities STATIC ${SOURCES})
