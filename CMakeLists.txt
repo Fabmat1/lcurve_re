@@ -4,6 +4,13 @@ project(lcurve_re)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd -fopt-info-vec-optimized")
 
+# Check for CUDA
+find_package(CUDA)
+if(CUDA_FOUND)
+    add_definitions(-DHAVE_CUDA)
+    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_70)
+    enable_language(CUDA)
+endif()
 
 # --- Find gnuplot-iostream header (header-only) ---
 find_path(GNUPLOT_IOSTREAM_INCLUDE_DIR
@@ -86,6 +93,12 @@ set(SOURCES
 
 add_library(utilities STATIC ${SOURCES})
 
+# Link CUDA runtime if found
+if(CUDA_FOUND)
+    target_link_libraries(utilities ${CUDA_LIBRARIES})
+    target_include_directories(utilities PUBLIC ${CUDA_INCLUDE_DIRS})
+endif()
+
 add_executable(lcurve_re main.cpp)
 add_executable(lcurve_mcmc new_scripts/mcmc_solver.cpp)
 add_executable(simplex new_scripts/simplex.cpp)
@@ -107,3 +120,21 @@ target_link_libraries(lcurve_re PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_mcmc PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(simplex PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(test PRIVATE Boost::filesystem Boost::iostreams)
+
+# Installation configuration
+include(GNUInstallDirs)
+
+# Install the main executables to bin directory
+install(TARGETS lcurve_re lcurve_mcmc
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT Runtime)
+
+# Optionally install other executables (uncomment if needed)
+# install(TARGETS simplex test
+#         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+#         COMPONENT Runtime)
+
+# Set default install prefix if not specified
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "/usr/local" CACHE PATH "Default install prefix" FORCE)
+endif()
