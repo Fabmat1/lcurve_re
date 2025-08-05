@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.28.3)
 project(lcurve_re)
 
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd -fopt-info-vec-optimized")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd")
 
 # Check for CUDA
 find_package(CUDA)
@@ -101,38 +101,33 @@ endif()
 
 add_executable(lcurve_re main.cpp)
 add_executable(lcurve_mcmc new_scripts/mcmc_solver.cpp)
-add_executable(simplex new_scripts/simplex.cpp)
+add_executable(lcurve_simplex new_scripts/simplex.cpp)
 add_executable(test new_scripts/test.cpp)
 
 target_link_libraries(lcurve_re PRIVATE utilities)
 target_link_libraries(lcurve_mcmc PRIVATE utilities)
-target_link_libraries(simplex PRIVATE utilities)
+target_link_libraries(lcurve_simplex PRIVATE utilities)
 target_link_libraries(test PRIVATE utilities)
 
 # Find and link nlohmann_json (header-only, no linking needed, just include path)
 find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(lcurve_re PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lcurve_mcmc PRIVATE nlohmann_json::nlohmann_json)
-target_link_libraries(simplex PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(lcurve_simplex PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(test PRIVATE nlohmann_json::nlohmann_json)
 
 target_link_libraries(lcurve_re PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_mcmc PRIVATE Boost::filesystem Boost::iostreams)
-target_link_libraries(simplex PRIVATE Boost::filesystem Boost::iostreams)
+target_link_libraries(lcurve_simplex PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(test PRIVATE Boost::filesystem Boost::iostreams)
 
 # Installation configuration
 include(GNUInstallDirs)
 
 # Install the main executables to bin directory
-install(TARGETS lcurve_re lcurve_mcmc
+install(TARGETS lcurve_re lcurve_mcmc lcurve_simplex
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT Runtime)
-
-# Optionally install other executables (uncomment if needed)
-# install(TARGETS simplex test
-#         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-#         COMPONENT Runtime)
 
 # Set default install prefix if not specified
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)

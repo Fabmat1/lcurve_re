@@ -6,6 +6,8 @@
 #include <iostream>
 #include "mass_ratio_pdf.h"
 #include "lcurve_base/lcurve.h"
+#include <limits>  
+#include <sstream>
 
 double day_to_sec = 86400.0;
 double km_to_solrad = 1/695700.0;
@@ -57,11 +59,19 @@ double mass_ratio_from_inclination(double inclination, double mass1, double min_
     double c_lo = 1e-6;
     double c_hi = 1e5;
     double c_sol = 0.0;
-    try {
+    try
+    {
         c_sol = bisect(f, c_lo, c_hi);
-    } catch (const exception &e) {
-        cerr << "Error: " << e.what() << "\n";
-        return 1e-12;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "\n[Mass-ratio inversion ERROR]\n"
+                  << "  inclination  : " << inclination   << " deg\n"
+                  << "  m1 (primary) : " << mass1         << " M☉\n"
+                  << "  m2,min       : " << min_mass2      << " M☉\n"
+                  << "  message      : " << e.what()       << '\n'
+                  << std::flush;
+        return -1.0;
     }
 
     return c_sol / mass1;
@@ -137,6 +147,23 @@ public:
         normal_distribution<double> dist_R(R_mean, R_err);
         normal_distribution<double> dist_P(P_mean, P_err);
         
+        /* ── helper: draw strictly positive values ────────────────────────── */
+        auto sample_pos = [&](auto &dist, int max_iter = 10000) -> double
+        {
+            for (int i = 0; i < max_iter; ++i)
+            {
+                double v = dist(gen);
+                if (v > 0.0 && std::isfinite(v)) return v;
+            }
+            std::ostringstream oss;
+            oss << "[sample_pos ERROR] Could not obtain a positive draw after "
+                << max_iter << " attempts.\n"
+                << "  Distribution  mean = " << dist.mean()
+                << "  stddev = " << dist.stddev() << '\n';
+            throw std::runtime_error(oss.str());
+        };
+
+        // Sample across all inclinations
         vector<double> all_ratios;
         vector<double> all_vs;
         vector<double> all_rs;
@@ -153,15 +180,26 @@ public:
             if (sin_i < 1e-6) continue;
             
             for (int i = 0; i < nsamp; ++i) {
-                double m1 = dist_m1(gen);
-                double m2 = dist_m2(gen);
-                double K = dist_K(gen);
-                double R = dist_R(gen);
-                double P = dist_P(gen);
+                double m1 = sample_pos(dist_m1);
+                double m2 = sample_pos(dist_m2);
+                double K = sample_pos(dist_K);
+                double R = sample_pos(dist_R);
+                double P = sample_pos(dist_P);
                 
                 double q = mass_ratio_from_inclination(incl, m1, m2);
                 double v_s = (1+1/q) * K / sin_i;
                 double r_s = 2*M_PI*R / (P*day_to_sec * v_s* km_to_solrad);
+
+                // ── sanity checks ───────────────────────────────
+                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
+                    !std::isfinite(q)  || !std::isfinite(v_s) ||
+                    !std::isfinite(r_s))
+                {
+                    // uncomment the next line if you want a trace
+                    // std::cerr << "Skipping unphysical sample  q="
+                    //           << q << "  v_s=" << v_s << "  r_s=" << r_s << '\n';
+                    continue;            // throw sample away
+                }
                 
                 all_ratios.push_back(q);
                 all_vs.push_back(v_s);
@@ -246,16 +284,27 @@ public:
             r_scales.reserve(nsamp);
             
             for (int i = 0; i < nsamp; ++i) {
-                double m1 = dist_m1(gen);
-                double m2 = dist_m2(gen);
-                double K = dist_K(gen);
-                double R = dist_R(gen);
-                double P = dist_P(gen);
+                double m1 = sample_pos(dist_m1);
+                double m2 = sample_pos(dist_m2);
+                double K = sample_pos(dist_K);
+                double R = sample_pos(dist_R);
+                double P = sample_pos(dist_P);
                 
                 double q = mass_ratio_from_inclination(incl, m1, m2);
                 double v_s = (1 + 1 / q) * K / sin_i;
                 double r_s = 2 * M_PI * R / (P * day_to_sec * v_s* km_to_solrad);
                 
+                // ── sanity checks ───────────────────────────────
+                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
+                    !std::isfinite(q)  || !std::isfinite(v_s) ||
+                    !std::isfinite(r_s))
+                {
+                    // uncomment the next line if you want a trace
+                    // std::cerr << "Skipping unphysical sample  q="
+                    //           << q << "  v_s=" << v_s << "  r_s=" << r_s << '\n';
+                    continue;            // throw sample away
+                }
+
                 ratios.push_back(q);
                 v_scales.push_back(v_s);
                 r_scales.push_back(r_s);
