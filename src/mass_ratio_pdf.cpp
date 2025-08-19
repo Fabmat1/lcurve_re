@@ -77,6 +77,26 @@ double mass_ratio_from_inclination(double inclination, double mass1, double min_
     return c_sol / mass1;
 }
 
+/* ───────────────── Scott’s bandwidth helper ───────────────────────── */
+inline double scott_bandwidth(const std::vector<double>& data)
+{
+    const std::size_t n = data.size();
+    if (n < 2) return 0.0;                   // not enough data
+
+    /* mean */
+    const double mean = std::accumulate(data.begin(), data.end(), 0.0) / n;
+
+    /* unbiased variance */
+    double var = 0.0;
+    for (double v : data) var += (v - mean) * (v - mean);
+    var /= static_cast<double>(n - 1);
+
+    const double sigma = std::sqrt(var);
+
+    /* Scott:  h = 1.06 σ n^(-1/5) */
+    return 1.06 * sigma * std::pow(static_cast<double>(n), -0.2);
+}
+
 class MassRatioPDFGrid {
 private:
     // Grid parameters
@@ -276,93 +296,91 @@ public:
             
             // Skip very small inclinations
             if (sin_i < 1e-6) continue;
-            
-            // Generate samples for this inclination
-            vector<double> ratios, v_scales, r_scales;
+
+            /* ───────────────── generate samples for THIS inclination ─────────── */
+            std::vector<double> ratios, v_scales, r_scales;
             ratios.reserve(nsamp);
             v_scales.reserve(nsamp);
             r_scales.reserve(nsamp);
-            
-            for (int i = 0; i < nsamp; ++i) {
+
+            for (int i = 0; i < nsamp; ++i)
+            {
                 double m1 = sample_pos(dist_m1);
                 double m2 = sample_pos(dist_m2);
-                double K = sample_pos(dist_K);
-                double R = sample_pos(dist_R);
-                double P = sample_pos(dist_P);
-                
-                double q = mass_ratio_from_inclination(incl, m1, m2);
-                double v_s = (1 + 1 / q) * K / sin_i;
-                double r_s = 2 * M_PI * R / (P * day_to_sec * v_s* km_to_solrad);
-                
-                // ── sanity checks ───────────────────────────────
-                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
-                    !std::isfinite(q)  || !std::isfinite(v_s) ||
-                    !std::isfinite(r_s))
-                {
-                    // uncomment the next line if you want a trace
-                    // std::cerr << "Skipping unphysical sample  q="
-                    //           << q << "  v_s=" << v_s << "  r_s=" << r_s << '\n';
-                    continue;            // throw sample away
-                }
+                double K  = sample_pos(dist_K);
+                double R  = sample_pos(dist_R);
+                double P  = sample_pos(dist_P);
 
-                ratios.push_back(q);
+                const double q  = mass_ratio_from_inclination(incl, m1, m2);
+                const double v_s = (1.0 + 1.0 / q) * K / sin_i;
+                const double r_s = 2.0 * M_PI * R /
+                                   (P * day_to_sec * v_s * km_to_solrad);
+
+                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
+                    !std::isfinite(q)  || !std::isfinite(v_s) || !std::isfinite(r_s))
+                    continue;                             // reject unphysical sample
+
+                ratios  .push_back(q);
                 v_scales.push_back(v_s);
                 r_scales.push_back(r_s);
             }
-            
-            // Compute KDE bandwidths
-            auto compute_bandwidth = [](const vector<double>& data, int n) {
-                double sum = accumulate(data.begin(), data.end(), 0.0);
-                double mean = sum / n;
-                double sq_sum = 0.0;
-                for (double v : data) {
-                    sq_sum += (v - mean) * (v - mean);
-                }
-                double sigma = sqrt(sq_sum / (n - 1));
-                return 1.06 * sigma * pow(static_cast<double>(n), -0.2);
-            };
-            
-            double h_q = compute_bandwidth(ratios, nsamp);
-            double h_vs = compute_bandwidth(v_scales, nsamp);
-            double h_rs = compute_bandwidth(r_scales, nsamp);
-            
-            // Compute PDFs using KDE
-            const double inv_sqrt_2pi = 1.0 / sqrt(2.0 * M_PI);
-            
-            // Mass ratio PDF
-            for (int i_q = 0; i_q < n_q; ++i_q) {
-                double q = q_grid[i_q];
-                double pdf_val = 0.0;
-                
-                for (double xi : ratios) {
-                    double u = (q - xi) / h_q;
-                    pdf_val += exp(-0.5 * u * u) * inv_sqrt_2pi;
-                }
-                pdf_grid_q[i_incl][i_q] = pdf_val / (nsamp * h_q);
+
+            /* ───────────────── KDE: use the *surviving* number of samples ─────── */
+            const std::size_t n_i = ratios.size();
+            if (n_i == 0)                                 // nothing survived
+            {
+                std::fill(pdf_grid_q [i_incl].begin(), pdf_grid_q [i_incl].end(), 1e-12);
+                std::fill(pdf_grid_vs[i_incl].begin(), pdf_grid_vs[i_incl].end(), 1e-12);
+                std::fill(pdf_grid_rs[i_incl].begin(), pdf_grid_rs[i_incl].end(), 1e-12);
+                continue;
             }
-            
-            // Velocity scale PDF
-            for (int i_vs = 0; i_vs < n_vs; ++i_vs) {
-                double vs = vs_grid[i_vs];
+
+            const double h_q  = scott_bandwidth(ratios   );
+            const double h_vs = scott_bandwidth(v_scales );
+            const double h_rs = scott_bandwidth(r_scales );
+
+            const double inv_sqrt_2pi = 1.0 / std::sqrt(2.0 * M_PI);
+
+            /* -------- mass-ratio pdf ------------------------------------------- */
+            for (int i_q = 0; i_q < n_q; ++i_q)
+            {
+                const double q_val = q_grid[i_q];
                 double pdf_val = 0.0;
-                
-                for (double xi : v_scales) {
-                    double u = (vs - xi) / h_vs;
-                    pdf_val += exp(-0.5 * u * u) * inv_sqrt_2pi;
+
+                for (double xi : ratios)
+                {
+                    const double u = (q_val - xi) / h_q;
+                    pdf_val += std::exp(-0.5 * u * u);
                 }
-                pdf_grid_vs[i_incl][i_vs] = pdf_val / (nsamp * h_vs);
+                pdf_grid_q[i_incl][i_q] = pdf_val * inv_sqrt_2pi / (n_i * h_q); // n_i !
             }
-            
-            // Radius scale PDF
-            for (int i_rs = 0; i_rs < n_rs; ++i_rs) {
-                double rs = rs_grid[i_rs];
+
+            /* -------- velocity-scale pdf --------------------------------------- */
+            for (int i_vs = 0; i_vs < n_vs; ++i_vs)
+            {
+                const double vs_val = vs_grid[i_vs];
                 double pdf_val = 0.0;
-                
-                for (double xi : r_scales) {
-                    double u = (rs - xi) / h_rs;
-                    pdf_val += exp(-0.5 * u * u) * inv_sqrt_2pi;
+
+                for (double xi : v_scales)
+                {
+                    const double u = (vs_val - xi) / h_vs;
+                    pdf_val += std::exp(-0.5 * u * u);
                 }
-                pdf_grid_rs[i_incl][i_rs] = pdf_val / (nsamp * h_rs);
+                pdf_grid_vs[i_incl][i_vs] = pdf_val * inv_sqrt_2pi / (n_i * h_vs);
+            }
+
+            /* -------- radius-scale pdf ----------------------------------------- */
+            for (int i_rs = 0; i_rs < n_rs; ++i_rs)
+            {
+                const double rs_val = rs_grid[i_rs];
+                double pdf_val = 0.0;
+
+                for (double xi : r_scales)
+                {
+                    const double u = (rs_val - xi) / h_rs;
+                    pdf_val += std::exp(-0.5 * u * u);
+                }
+                pdf_grid_rs[i_incl][i_rs] = pdf_val * inv_sqrt_2pi / (n_i * h_rs);
             }
         }
         

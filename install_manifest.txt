@@ -1,3 +1,0 @@
-/usr/local/bin/lcurve_re
-/usr/local/bin/lcurve_mcmc
-/usr/local/bin/lcurve_simplex
