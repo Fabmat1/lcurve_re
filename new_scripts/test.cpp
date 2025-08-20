@@ -15,23 +15,23 @@ int main() {
     // ───────────────────────────────────────────────────────────────
     // 1) Initialize the grid with all parameters
     // ───────────────────────────────────────────────────────────────
-    const double m1_mean = 2.0;
-    const double m1_err = 0.1;
-    const double m2_mean = 0.5;
-    const double m2_err = 0.05;
+    const double m1_mean = 0.82;
+    const double m1_err = 0.17;
+    const double m2_mean = 1.3;
+    const double m2_err = 0.27;
     
     // New parameters for velocity and radius scales
-    const double K_mean = 50.0;    // km/s
+    const double K_mean = 186.2;    // km/s
     const double K_err = 2.0;      // km/s
-    const double R_mean = 1.5;     // solar radii
-    const double R_err = 0.1;      // solar radii
-    const double P_mean = 3.0;     // days
-    const double P_err = 0.01;     // days
+    const double R_mean = 0.309;     // solar radii
+    const double R_err = 0.02;      // solar radii
+    const double P_mean = 0.31955193;     // days
+    const double P_err = 0.00000028;     // days
     
-    const double test_inclination = 30.0;  // degrees
-    const double q_eval = 0.25;
-    const double vs_eval = 150.0;  // km/s
-    const double rs_eval = 0.003;   // unitless
+    const double test_inclination = 50.0;  // degrees
+    const double q_eval = 1.57;
+    const double vs_eval = 427.0;  // km/s
+    const double rs_eval = 0.118;   // unitless
     
     std::cout << "=== Multi-Scale PDF Grid Test ===" << std::endl;
     std::cout << "Initializing grid with:" << std::endl;
@@ -49,11 +49,11 @@ int main() {
         m1_mean, m1_err, m2_mean, m2_err,
         K_mean, K_err, R_mean, R_err, P_mean, P_err,
         15.0, 90.0,    // inclination range [15, 90] degrees
-        76,            // inclination points
-        400,           // q points
-        400,           // v_s points
-        400,           // r_s points
-        30000          // samples for accuracy
+        100,            // inclination points
+        500,           // q points
+        500,           // v_s points
+        500,           // r_s points
+        100000          // samples for accuracy
     );
     
     auto end_init = std::chrono::high_resolution_clock::now();
@@ -417,6 +417,105 @@ int main() {
     std::cout << "  High q (10.0): " << (out_bounds2 ? "IN" : "OUT") << std::endl;
     std::cout << "  High v_s (1e6): " << (out_bounds3 ? "IN" : "OUT") << std::endl;
     
+
+    // ───────────────────────────────────────────────────────────────
+    // 12) 2-D PDF heat-maps   ( i vs q  |  i vs r_s )
+    // ───────────────────────────────────────────────────────────────
+    try
+    {
+        Gnuplot gp3;
+
+        /* ----------------------------------------------------------------
+           Build a reasonably fine grid in (inclination,q) and (inclination,r_s)
+           that covers the *full* range that is actually tabulated in the
+           MassRatioPDFGrid.  We do not have direct access to the internal
+           min / max – but they are printed by print_grid_info(), so just
+           copy them here (or change them by hand if you adjust the grid).
+           ---------------------------------------------------------------- */
+        const double I_MIN = 15.0;   // deg   (must match initialise-call!)
+        const double I_MAX = 90.0;   // deg
+        const double Q_MIN = 0.7;    // good generic range; outside grid gives 1e-12
+        const double Q_MAX = 3.5;
+        const double RS_MIN = 0.07;
+        const double RS_MAX = 0.15; // 0.01 ≃ 1 % of a solar radius / a~few days
+
+        const int NI  = 500;         // same density that the grid itself uses
+        const int NQ  = 500;         // enough to make the map smooth
+        const int NRS = 500;
+
+        /* -------------- build inclination vector (inclusive end points) */
+        std::vector<double> I_vals(NI);
+        for (int k = 0; k < NI; ++k)
+            I_vals[k] = I_MIN + k * (I_MAX - I_MIN) / (NI - 1);
+
+        std::vector<double> Q_vals(NQ);
+        for (int k = 0; k < NQ; ++k)
+            Q_vals[k] = Q_MIN + k * (Q_MAX - Q_MIN) / (NQ - 1);
+
+        std::vector<double> RS_vals(NRS);
+        for (int k = 0; k < NRS; ++k)
+            RS_vals[k] = RS_MIN + k * (RS_MAX - RS_MIN) / (NRS - 1);
+
+        /* ------------------  data block :  i  vs  q  ------------------- */
+        gp3 << "$IQ_PDF << EOD\n";
+        for (double inc : I_vals)
+        {
+            for (double q : Q_vals)
+            {
+                double pdf = mass_ratio_pdf(inc, q);
+                gp3 << inc << " " << q << " " << pdf << "\n";
+            }
+            gp3 << "\n";                        // blank line → new scanline
+        }
+        gp3 << "EOD\n";
+
+        /* ------------------  data block :  i  vs  r_s  ----------------- */
+        gp3 << "$IRS_PDF << EOD\n";
+        for (double inc : I_vals)
+        {
+            for (double rs : RS_vals)
+            {
+                double pdf = radius_scale_pdf(inc, rs);
+                gp3 << inc << " " << rs << " " << pdf << "\n";
+            }
+            gp3 << "\n";
+        }
+        gp3 << "EOD\n";
+
+        /* ------------------------- plotting ---------------------------- */
+        gp3 << "set term qt size 1000,450\n";
+        gp3 << "set multiplot layout 1,2 title '2-D PDF maps (log colour-scale)'\n";
+
+        // ----- panel 1 :  i  vs q
+        gp3 << "set xlabel 'Inclination  i  [deg]'\n";
+        gp3 << "set ylabel 'Mass ratio  q'\n";
+        gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
+        gp3 << "set yrange [" << Q_MIN << ":" << Q_MAX << "]\n";
+        gp3 << "set logscale cb\n";
+        gp3 << "set cbrange [1e-2:2]\n";        // <-- colour scale only 10⁻4 … 2
+        gp3 << "set cblabel 'PDF(i,q)'\n";
+        gp3 << "unset key\n";
+        gp3 << "set pm3d map\n";
+        gp3 << "splot $IQ_PDF using 1:2:3 notitle\n";
+
+        // ----- panel 2 :  i  vs r_s
+        gp3 << "set xlabel 'Inclination  i  [deg]'\n";
+        gp3 << "set ylabel 'Radius-scale  r_s'\n";
+        gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
+        gp3 << "set yrange [" << RS_MIN << ":" << RS_MAX << "]\n";
+        gp3 << "set cblabel 'PDF(i,r_s)'\n";
+        gp3 << "splot $IRS_PDF using 1:2:3 notitle\n";
+
+        gp3 << "unset multiplot\n";
+
+        std::cout << "\n2-D heat-maps shown – look for horizontal banding along i.\n";
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[2-D plot ERROR] " << e.what() << std::endl;
+    }
+
+
     // ───────────────────────────────────────────────────────────────
     // 11) Statistical summary
     // ───────────────────────────────────────────────────────────────
