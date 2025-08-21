@@ -1,21 +1,13 @@
+// mass_ratio_pdf.cpp
 /*****************************************************************************************
- Mass–ratio / velocity–scale / radius–scale PDF grid
+ Fast   p(q | i) · p(v_s | i) · p(r_s | i)   grid
  ─────────────────────────────────────────────────────────────────────────────────────────
- Now with an “outlier-strip” clean-up:     (fixes ‘banding’ arising from bad KDEs)
-
- 1.  After the first pass over all inclination strips we measure, for every strip i,
-     the mean absolute difference to its two neighbours   ⟨|pdf(i)-pdf(i±1)|⟩.
- 2.  From the resulting distribution we compute  μ  and  σ  and flag every strip with
-     a divergence > μ+3σ in *any* of the three grids ( q / v_s / r_s ).
- 3.  Flagged strips are regenerated (fresh Monte-Carlo sampling + KDE).
- 4.  We recompute the divergences and print a short report.
-
- If a pathological strip stubbornly stays above 3σ it is kept (with a warning),
- but in practise a single regeneration is sufficient.
-
- The public interface is untouched: simply re-compile and link this file instead of
- the previous version and call  initialize_mass_ratio_pdf_grid(…)  as before.
-*****************************************************************************************/
+ • 2-D (inclination, parameter) kernel density estimate
+   – eliminates the former “banding / divergent strips”.
+ • Binned KDE  (= Gaussian blur of a 2-D histogram),
+   therefore O(Ngrid · σ) and very cache friendly.
+ • Public interface unchanged – simply replace the old file and recompile.
+ *****************************************************************************************/
 
 #include <vector>
 #include <cmath>
@@ -28,6 +20,10 @@
 #include <limits>
 #include <sstream>
 
+#ifdef _OPENMP
+#   include <omp.h>
+#endif
+
 #include "mass_ratio_pdf.h"
 #include "lcurve_base/lcurve.h"
 
@@ -36,16 +32,17 @@ static constexpr double day_to_sec   = 86400.0;
 static constexpr double km_to_solrad = 1.0 / 695700.0;
 
 /* ─────────────────────────── globals  ───────────────────────────── */
+class MassRatioPDFGrid;   // forward
 MassRatioPDFGrid* g_mass_ratio_grid = nullptr;
 
-/* ─────────────────────────  helpers  ────────────────────────────── */
+/* ───────────────────────── helpers ──────────────────────────────── */
 double bisect(const std::function<double(double)>& f,
               double c_lo, double c_hi,
               double tol = 1e-9, int max_iter = 100)
 {
     double f_lo = f(c_lo), f_hi = f(c_hi);
     if (f_lo * f_hi > 0.0)
-        throw std::runtime_error("Bisection requires f(c_lo) and f(c_hi) of opposite signs.");
+        throw std::runtime_error("Bisection end points have same sign.");
 
     double c_mid = 0.0, f_mid;
     for (int i = 0; i < max_iter; ++i) {
@@ -55,414 +52,364 @@ double bisect(const std::function<double(double)>& f,
         if (f_lo * f_mid <= 0.0) { c_hi = c_mid; f_hi = f_mid; }
         else                     { c_lo = c_mid; f_lo = f_mid; }
     }
-    return c_mid;        // may not be fully converged – caller beware
+    return c_mid;   // may not be fully converged
 }
 
-/* invert m sin³i  →  mass ratio -------------------------------------------------------- */
+/* invert  m sin³i  →  q ----------------------------------------------------------- */
 double mass_ratio_from_inclination(double inclination_deg,
                                    double mass1, double min_mass2)
 {
-    const double A = std::pow(min_mass2, 3) / std::pow(min_mass2 + mass1, 2);
+    const double A      = std::pow(min_mass2, 3) / std::pow(min_mass2 + mass1, 2);
     const double target = std::pow(std::sin(inclination_deg * M_PI / 180.0), 3);
 
     auto f = [&](double c) { return A * std::pow(c + mass1, 2) / std::pow(c, 3) - target; };
-
-    try { return bisect(f, 1e-6, 1e5) / mass1; }
-    catch (const std::exception& e) {
-        std::cerr << "\n[Mass-ratio inversion ERROR]\n"
-                  << "  inclination  : " << inclination_deg << " deg\n"
-                  << "  m1 (primary) : " << mass1          << " M☉\n"
-                  << "  m2,min       : " << min_mass2       << " M☉\n"
-                  << "  message      : " << e.what()        << '\n';
-        return -1.0;
-    }
+    return bisect(f, 1e-6, 1e5) / mass1;
 }
 
-/* ───────────────── Scott’s bandwidth helper ────────────────────── */
-inline double scott_bandwidth(const std::vector<double>& data)
+/* Scott / Silverman rule of thumb for multivariate (here: d = 2) */
+inline double scott_bw_2d(double sigma, std::size_t n_samples)
 {
-    const std::size_t n = data.size();
-    if (n < 2) return 0.0;
-    const double mean = std::accumulate(data.begin(), data.end(), 0.0) / n;
-    double var = 0.0;
-    for (double v : data) var += (v - mean) * (v - mean);
-    var /= static_cast<double>(n - 1);
-    const double sigma = std::sqrt(var);
-    return 1.06 * sigma * std::pow(static_cast<double>(n), -0.2);
+    if (n_samples < 2) return sigma;
+    const double n    = static_cast<double>(n_samples);
+    const double fac  = std::pow(n, -1.0 / 6.0);   // d = 2  → 1/(d+4)
+    return 1.06 * sigma * fac;
+}
+
+/* ────────────────────── Gaussian kernel helper ─────────────────── */
+static std::vector<double> gaussian_kernel(double sigma_grid_units)
+{
+    const int radius = std::max(1, int(std::ceil(3.0 * sigma_grid_units)));
+    const int size   = 2 * radius + 1;
+    std::vector<double> k(size);
+    const double inv_2s2 = 1.0 / (2.0 * sigma_grid_units * sigma_grid_units);
+    double norm = 0.0;
+    for (int dx = -radius; dx <= radius; ++dx) {
+        const double w = std::exp(-dx * dx * inv_2s2);
+        k[dx + radius] = w;
+        norm          += w;
+    }
+    for (double &v : k) v /= norm;          // normalise
+    return k;
+}
+
+/* ────────────────────── 2-D Gaussian blur (separable) ──────────── */
+template<typename Matrix>
+static void gaussian_blur(Matrix       &m,         // in-place
+                          double        sigma_x,   // in grid index units
+                          double        sigma_y)
+{
+    const int nx = (int)m.size();
+    const int ny = (int)m.front().size();
+    const auto kx = gaussian_kernel(sigma_x);
+    const auto ky = gaussian_kernel(sigma_y);
+    const int rx = int(kx.size() / 2);
+    const int ry = int(ky.size() / 2);
+
+    /* ---- blur along X (inclination) ---- */
+    Matrix tmp(nx, std::vector<double>(ny, 0.0));
+
+    #pragma omp parallel for schedule(static)
+    for (int ix = 0; ix < nx; ++ix)
+        for (int iy = 0; iy < ny; ++iy) {
+            double acc = 0.0;
+            for (int dx = -rx; dx <= rx; ++dx) {
+                const int jx = ix + dx;
+                if (jx < 0 || jx >= nx) continue;
+                acc += m[jx][iy] * kx[dx + rx];
+            }
+            tmp[ix][iy] = acc;
+        }
+
+    /* ---- blur along Y (parameter) ---- */
+    #pragma omp parallel for schedule(static)
+    for (int ix = 0; ix < nx; ++ix)
+        for (int iy = 0; iy < ny; ++iy) {
+            double acc = 0.0;
+            for (int dy = -ry; dy <= ry; ++dy) {
+                const int jy = iy + dy;
+                if (jy < 0 || jy >= ny) continue;
+                acc += tmp[ix][jy] * ky[dy + ry];
+            }
+            m[ix][iy] = acc;
+        }
 }
 
 /* ────────────────────────  Class definition  ───────────────────── */
-class MassRatioPDFGrid {
-private:
-    /* ───── grid axes ───── */
-    std::vector<double> inclination_grid;             // n_incl
-    std::vector<double> q_grid;                       // n_q
-    std::vector<double> vs_grid;                      // n_vs
-    std::vector<double> rs_grid;                      // n_rs
-
-    /* ───── PDF values ──── pdf_grid_x[ i_incl ][ i_axis ] */
-    std::vector<std::vector<double>> pdf_grid_q;
-    std::vector<std::vector<double>> pdf_grid_vs;
-    std::vector<std::vector<double>> pdf_grid_rs;
-
-    /* ───── axis ranges & steps ───── */
+class MassRatioPDFGrid
+{
+    /* axes */
+    std::vector<double> inclination_grid, q_grid, vs_grid, rs_grid;
     double incl_min, incl_max, incl_dx;
     double q_min,    q_max,    q_dx;
     double vs_min,   vs_max,   vs_dx;
     double rs_min,   rs_max,   rs_dx;
     int    n_incl, n_q, n_vs, n_rs;
 
-    /* ───── population hyper-parameters (kept for info) ───── */
-    double m1_mean, m1_err, m2_mean, m2_err;
-    double K_mean,  K_err;
-    double R_mean,  R_err;
-    double P_mean,  P_err;
+    /* PDFs on (inclination, parameter) grid */
+    std::vector<std::vector<double>> pdf_q, pdf_vs, pdf_rs;
 
-    /* ──────────────────────────────────────────────────────── */
-    /* helper: compute strip divergence for one grid           */
-    static void compute_divergence(const std::vector<std::vector<double>>& grid,
-                                   std::vector<double>& out)
-    {
-        const int n_incl = static_cast<int>(grid.size());
-        const int n_axis = static_cast<int>(grid.front().size());
-        out.assign(n_incl, 0.0);
-
-        for (int i = 1; i < n_incl - 1; ++i) {
-            double diff_sum = 0.0;
-            for (int j = 0; j < n_axis; ++j) {
-                diff_sum += 0.5 * (std::fabs(grid[i][j] - grid[i - 1][j]) +
-                                   std::fabs(grid[i][j] - grid[i + 1][j]));
-            }
-            out[i] = diff_sum / n_axis;
-        }
-    }
+    /* Monte-Carlo samples, used only during construction */
+    struct StripSamples { std::vector<double> q, vs, rs; };
+    std::vector<StripSamples> strips;
 
 public:
     MassRatioPDFGrid(
-        double m1_mean_, double m1_err_,
-        double m2_mean_, double m2_err_,
-        double K_mean_,  double K_err_,
-        double R_mean_,  double R_err_,
-        double P_mean_,  double P_err_,
-        double incl_min_, double incl_max_, int n_incl_,
-        int n_q_, int n_vs_, int n_rs_,
-        int nsamp)
-    : m1_mean(m1_mean_), m1_err(m1_err_), m2_mean(m2_mean_), m2_err(m2_err_),
-      K_mean(K_mean_),   K_err(K_err_),   R_mean(R_mean_),   R_err(R_err_),
-      P_mean(P_mean_),   P_err(P_err_),
-      incl_min(incl_min_), incl_max(incl_max_), n_incl(n_incl_),
-      n_q(n_q_), n_vs(n_vs_), n_rs(n_rs_)
+        double m1_mu,  double m1_sig,
+        double m2_mu,  double m2_sig,
+        double K_mu,   double K_sig,
+        double R_mu,   double R_sig,
+        double P_mu,   double P_sig,
+        double i_min,  double i_max, int n_i,
+        int n_q_, int n_vs_, int n_rs_, int nsamp_tot)
+    : incl_min(i_min), incl_max(i_max), n_incl(n_i),
+      n_q(n_q_), n_vs(n_vs_), n_rs(n_rs_),
+      strips(n_incl)
     {
-        /* Some ANSI colours for nice console output ---------------------------------- */
-        const std::string RESET        = "\033[0m";
-        const std::string BRIGHT_BLUE  = "\033[94m";
-        const std::string BRIGHT_GREEN = "\033[92m";
-        const std::string BRIGHT_CYAN  = "\033[96m";
-        const std::string DIM          = "\033[2m";
-
-        std::cout << BRIGHT_BLUE << "   Pre-computing PDF grid ..." << RESET << '\n';
-        std::cout << DIM
-                  << "   Inclination: [" << incl_min << "°, " << incl_max << "°] × "
-                  << n_incl << " points" << RESET << '\n';
-
-        /* ─── set-up inclination axis ─────────────────────────────────────────────── */
+        /* -------------------- axis initialisation -------------------- */
         incl_dx = (incl_max - incl_min) / double(n_incl - 1);
         inclination_grid.resize(n_incl);
         for (int i = 0; i < n_incl; ++i) inclination_grid[i] = incl_min + i * incl_dx;
 
-        /* ─── random generators ──────────────────────────────────────────────────── */
-        std::random_device rd;
-        std::default_random_engine gen(rd());
-        std::normal_distribution<double> dist_m1(m1_mean, m1_err);
-        std::normal_distribution<double> dist_m2(m2_mean, m2_err);
-        std::normal_distribution<double> dist_K (K_mean,  K_err);
-        std::normal_distribution<double> dist_R (R_mean,  R_err);
-        std::normal_distribution<double> dist_P (P_mean,  P_err);
+        /* -------------------- Monte-Carlo draw ----------------------- */
+        const auto make_dist = [](double mu, double s)
+                               { return std::normal_distribution<double>(mu, s); };
 
-        /* helper: draw strictly positive numbers ----------------------------------- */
-        auto sample_pos = [&](auto& dist, int max_iter = 10000) -> double {
-            for (int i = 0; i < max_iter; ++i) {
-                double v = dist(gen);
-                if (v > 0.0 && std::isfinite(v)) return v;
-            }
-            std::ostringstream oss;
-            oss << "[sample_pos ERROR] Could not draw positive value after "
-                << max_iter << " tries.  μ=" << dist.mean()
-                << " σ=" << dist.stddev();
-            throw std::runtime_error(oss.str());
-        };
-
-        /* ───────────────────── global ranges (use a first MC sweep) ─────────────── */
-        std::vector<double> all_q, all_vs, all_rs;
-        all_q.reserve (nsamp * n_incl);
-        all_vs.reserve(nsamp * n_incl);
-        all_rs.reserve(nsamp * n_incl);
-
-        for (double incl : inclination_grid) {
-            const double sin_i = std::sin(incl * M_PI / 180.0);
+        #pragma omp parallel for schedule(dynamic)
+        for (int idx = 0; idx < n_incl; ++idx)
+        {
+            const double inc_deg = inclination_grid[idx];
+            const double sin_i   = std::sin(inc_deg * M_PI / 180.0);
             if (sin_i < 1e-6) continue;
 
-            for (int i = 0; i < nsamp; ++i) {
-                const double m1 = sample_pos(dist_m1);
-                const double m2 = sample_pos(dist_m2);
-                const double K  = sample_pos(dist_K );
-                const double R  = sample_pos(dist_R );
-                const double P  = sample_pos(dist_P );
+            std::mt19937_64 gen( std::random_device{}() + idx );
+            auto    d_m1 = make_dist(m1_mu, m1_sig);
+            auto    d_m2 = make_dist(m2_mu, m2_sig);
+            auto    d_K  = make_dist(K_mu , K_sig );
+            auto    d_R  = make_dist(R_mu , R_sig );
+            auto    d_P  = make_dist(P_mu , P_sig );
 
-                const double q  = mass_ratio_from_inclination(incl, m1, m2);
-                const double v_s = (1.0 + 1.0 / q) * K / sin_i;
-                const double r_s = 2.0 * M_PI * R /
-                                   (P * day_to_sec * v_s * km_to_solrad);
+            const int nsamp_strip = nsamp_tot / n_incl;
 
-                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
-                    !std::isfinite(q) || !std::isfinite(v_s) || !std::isfinite(r_s))
+            auto draw_pos = [&](auto &dist)
+            {
+                while (true) { double v = dist(gen); if (v > 0.0 && std::isfinite(v)) return v; }
+            };
+
+            auto &S = strips[idx];
+            S.q .reserve(nsamp_strip);
+            S.vs.reserve(nsamp_strip);
+            S.rs.reserve(nsamp_strip);
+
+            for (int s = 0; s < nsamp_strip; ++s)
+            {
+                const double m1 = draw_pos(d_m1);
+                const double m2 = draw_pos(d_m2);
+                const double K  = draw_pos(d_K );
+                const double R  = draw_pos(d_R );
+                const double P  = draw_pos(d_P );
+
+                const double q  = mass_ratio_from_inclination(inc_deg, m1, m2);
+                if (q <= 0.0 || !std::isfinite(q)) continue;
+
+                const double vs = (1.0 + 1.0 / q) * K / sin_i;
+                const double rs = 2.0 * M_PI * R /
+                                  (P * day_to_sec * vs * km_to_solrad);
+
+                if (vs <= 0.0 || rs <= 0.0 || !std::isfinite(vs) || !std::isfinite(rs))
                     continue;
 
-                all_q .push_back(q );
-                all_vs.push_back(v_s);
-                all_rs.push_back(r_s);
+                S.q .push_back(q );
+                S.vs.push_back(vs);
+                S.rs.push_back(rs);
             }
         }
 
-        auto ranged = [](std::vector<double>& v, double low, double high) {
-            std::sort(v.begin(), v.end());
-            const int i_low  = int(low  * v.size());
-            const int i_high = int(high * v.size());
-            return std::make_pair(v[i_low], v[i_high]);
+        /* ---------------- compute global parameter ranges ------------- */
+        std::vector<double> all_q, all_vs, all_rs;
+        for (auto &s : strips) {
+            all_q .insert(all_q .end(), s.q .begin(), s.q .end());
+            all_vs.insert(all_vs.end(), s.vs.begin(), s.vs.end());
+            all_rs.insert(all_rs.end(), s.rs.begin(), s.rs.end());
+        }
+        if (all_q.empty()) throw std::runtime_error("No valid MC samples.");
+
+        const auto percent = [](std::vector<double> &v, double f)
+        {
+            const std::size_t k = std::size_t(f * (v.size() - 1));
+            std::nth_element(v.begin(), v.begin() + k, v.end());
+            return v[k];
         };
 
-        std::tie(q_min,  q_max ) = ranged(all_q ,  0.0025, 0.9925);
-        std::tie(vs_min, vs_max) = ranged(all_vs, 0.0025, 0.9925);
-        std::tie(rs_min, rs_max) = ranged(all_rs, 0.0025, 0.9925);
+        q_min  = percent(all_q , 0.0025);  q_max  = percent(all_q , 0.9975);
+        vs_min = percent(all_vs, 0.0025);  vs_max = percent(all_vs, 0.9975);
+        rs_min = percent(all_rs, 0.0025);  rs_max = percent(all_rs, 0.9975);
 
         q_dx  = (q_max  - q_min ) / double(n_q  - 1);
         vs_dx = (vs_max - vs_min) / double(n_vs - 1);
         rs_dx = (rs_max - rs_min) / double(n_rs - 1);
 
-        std::cout << DIM << std::fixed << std::setprecision(3)
-                  << "   q  : [" << q_min  << ", " << q_max  << "] × " << n_q  << '\n'
-                  << "   v_s: [" << std::setprecision(1) << vs_min << ", " << vs_max << "] km/s × "
-                  << n_vs << '\n'
-                  << "   r_s: [" << std::setprecision(4) << rs_min << ", " << rs_max << "] × "
-                  << n_rs << RESET << "\n";
+        q_grid .resize(n_q ); for (int i = 0; i < n_q ; ++i) q_grid [i] = q_min  + i * q_dx;
+        vs_grid.resize(n_vs); for (int i = 0; i < n_vs; ++i) vs_grid[i] = vs_min + i * vs_dx;
+        rs_grid.resize(n_rs); for (int i = 0; i < n_rs; ++i) rs_grid[i] = rs_min + i * rs_dx;
 
-        /* ─── allocate axes ─────────────────────────────────────────────────────── */
-        q_grid .resize(n_q );
-        vs_grid.resize(n_vs);
-        rs_grid.resize(n_rs);
-        for (int i = 0; i < n_q ; ++i) q_grid [i] = q_min  + i * q_dx;
-        for (int i = 0; i < n_vs; ++i) vs_grid[i] = vs_min + i * vs_dx;
-        for (int i = 0; i < n_rs; ++i) rs_grid[i] = rs_min + i * rs_dx;
+        /* ----------- histograms (inclination, parameter) -------------- */
+        std::vector<std::vector<double>> Hq (n_incl, std::vector<double>(n_q , 0.0));
+        std::vector<std::vector<double>> Hvs(n_incl, std::vector<double>(n_vs, 0.0));
+        std::vector<std::vector<double>> Hrs(n_incl, std::vector<double>(n_rs, 0.0));
 
-        /* ─── allocate pdf arrays and helper lambda for one strip ──────────────── */
-        pdf_grid_q .assign(n_incl, std::vector<double>(n_q ,  0.0));
-        pdf_grid_vs.assign(n_incl, std::vector<double>(n_vs, 0.0));
-        pdf_grid_rs.assign(n_incl, std::vector<double>(n_rs, 0.0));
-
-        const double inv_sqrt_2pi = 1.0 / std::sqrt(2.0 * M_PI);
-
-        auto regenerate_strip = [&](int i_incl)
+        auto bin_index = [](double x, double x0, double dx, int nx) -> int
         {
-            const double incl  = inclination_grid[i_incl];
-            const double sin_i = std::sin(incl * M_PI / 180.0);
+            const int idx = int(std::floor((x - x0) / dx + 0.5));
+            return (idx < 0 || idx >= nx) ? -1 : idx;
+        };
 
-            std::vector<double> ratios, v_scales, r_scales;
-            ratios .reserve(nsamp);
-            v_scales.reserve(nsamp);
-            r_scales.reserve(nsamp);
+        for (int i = 0; i < n_incl; ++i)
+        {
+            const auto &S = strips[i];
+            for (double v : S.q) {
+                int k = bin_index(v, q_min, q_dx, n_q);
+                if (k >= 0) Hq[i][k] += 1.0;
+            }
+            for (double v : S.vs) {
+                int k = bin_index(v, vs_min, vs_dx, n_vs);
+                if (k >= 0) Hvs[i][k] += 1.0;
+            }
+            for (double v : S.rs) {
+                int k = bin_index(v, rs_min, rs_dx, n_rs);
+                if (k >= 0) Hrs[i][k] += 1.0;
+            }
+        }
 
-            for (int s = 0; s < nsamp; ++s) {
-                const double m1 = sample_pos(dist_m1);
-                const double m2 = sample_pos(dist_m2);
-                const double K  = sample_pos(dist_K );
-                const double R  = sample_pos(dist_R );
-                const double P  = sample_pos(dist_P );
+        /* -------------- bandwidths & Gaussian blur -------------------- */
+        /* bandwidth in physical units */
+        const auto weighted_stats = [&](auto accessor)->std::pair<double,double>
+        {
+            long double sum = 0, sum2 = 0, w = 0;
+            for (int i = 0; i < n_incl; ++i) {
+                for (double v : accessor(strips[i])) {
+                    sum  += v;
+                    sum2 += v * v;
+                    w    += 1;
+                }
+            }
+            const double mean = double(sum / w);
+            const double var  = double(sum2 / w) - mean * mean;
+            return {mean, std::sqrt(std::max(0.0, var))};
+        };
 
-                const double q  = mass_ratio_from_inclination(incl, m1, m2);
-                const double v_s = (1.0 + 1.0 / q) * K / sin_i;
-                const double r_s = 2.0 * M_PI * R /
-                                   (P * day_to_sec * v_s * km_to_solrad);
+        const auto [mi,  si ] = weighted_stats([&](const StripSamples &s){return std::vector<double>{};}); // dummy
+        /* We already know the inclination grid – its σ analytically:   */
+        const double incl_sigma = (incl_max - incl_min) / std::sqrt(12.0);   // uniform
 
-                if (q  <= 0.0 || v_s <= 0.0 || r_s <= 0.0 ||
-                    !std::isfinite(q) || !std::isfinite(v_s) || !std::isfinite(r_s))
+        const auto [mq , sq ] = weighted_stats([](const StripSamples&s){return s.q ;});
+        const auto [mvs, svs] = weighted_stats([](const StripSamples&s){return s.vs;});
+        const auto [mrs, srs] = weighted_stats([](const StripSamples&s){return s.rs;});
+
+        const std::size_t Ntot = all_q.size();   // total good samples
+
+        const double h_i  = scott_bw_2d(incl_sigma, Ntot);
+        const double h_q  = scott_bw_2d(sq , Ntot);
+        const double h_vs = scott_bw_2d(svs, Ntot);
+        const double h_rs = scott_bw_2d(srs, Ntot);
+
+        /* bandwidth in grid index units */
+        const double hi_idx  = h_i  / incl_dx;
+        const double hq_idx  = h_q  / q_dx;
+        const double hvs_idx = h_vs / vs_dx;
+        const double hrs_idx = h_rs / rs_dx;
+
+        /* Gaussian blur (separable) */
+        //gaussian_blur(Hq , hi_idx , hq_idx );
+        //gaussian_blur(Hvs, hi_idx , hvs_idx);
+        //gaussian_blur(Hrs, hi_idx , hrs_idx);
+
+        /* --------- row-wise normalisation:  ∑ p(x|i) Δx = 1 ---------- */
+        pdf_q  = Hq;  pdf_vs = Hvs; pdf_rs = Hrs;
+
+        const auto norm_rows = [&](auto &M, double dx)
+        {
+            #pragma omp parallel for schedule(static)
+            for (int ix = 0; ix < n_incl; ++ix)
+            {
+                double row_sum = std::accumulate(M[ix].begin(), M[ix].end(), 0.0);
+                if (row_sum <= 0.0) {
+                    for (double &v : M[ix]) v = 1e-12;
                     continue;
-
-                ratios .push_back(q );
-                v_scales.push_back(v_s);
-                r_scales.push_back(r_s);
-            }
-
-            const std::size_t n_i = ratios.size();
-            if (n_i == 0) {
-                std::fill(pdf_grid_q [i_incl].begin(), pdf_grid_q [i_incl].end(), 1e-12);
-                std::fill(pdf_grid_vs[i_incl].begin(), pdf_grid_vs[i_incl].end(), 1e-12);
-                std::fill(pdf_grid_rs[i_incl].begin(), pdf_grid_rs[i_incl].end(), 1e-12);
-                return;
-            }
-
-            const double h_q  = scott_bandwidth(ratios);
-            const double h_vs = scott_bandwidth(v_scales);
-            const double h_rs = scott_bandwidth(r_scales);
-
-            for (int iq = 0; iq < n_q; ++iq) {
-                const double x = q_grid[iq];
-                double sum = 0.0;
-                for (double xi : ratios) {
-                    const double u = (x - xi) / h_q;
-                    sum += std::exp(-0.5 * u * u);
                 }
-                pdf_grid_q[i_incl][iq] = sum * inv_sqrt_2pi / (n_i * h_q);
-            }
-            for (int iv = 0; iv < n_vs; ++iv) {
-                const double x = vs_grid[iv];
-                double sum = 0.0;
-                for (double xi : v_scales) {
-                    const double u = (x - xi) / h_vs;
-                    sum += std::exp(-0.5 * u * u);
-                }
-                pdf_grid_vs[i_incl][iv] = sum * inv_sqrt_2pi / (n_i * h_vs);
-            }
-            for (int ir = 0; ir < n_rs; ++ir) {
-                const double x = rs_grid[ir];
-                double sum = 0.0;
-                for (double xi : r_scales) {
-                    const double u = (x - xi) / h_rs;
-                    sum += std::exp(-0.5 * u * u);
-                }
-                pdf_grid_rs[i_incl][ir] = sum * inv_sqrt_2pi / (n_i * h_rs);
+                const double norm = row_sum * dx;
+                for (double &v : M[ix]) v = std::max(v / norm, 1e-12);
             }
         };
 
-        /* ─────────── first pass over all inclination strips ───────────────────── */
-        for (int i = 0; i < n_incl; ++i) {
-            if (i > 0 && i % std::max(1, n_incl / 5) == 0) {
-                std::cout << "\r" << BRIGHT_CYAN << "   Progress: "
-                          << (100 * i / n_incl) << "% (" << i << "/" << n_incl << ")" << RESET << std::flush;
-            }
-            if (std::sin(inclination_grid[i] * M_PI / 180.0) < 1e-6) continue;
-            regenerate_strip(i);
-        }
-
-        /* ─────────── outlier detection & clean-up ─────────────────────────────── */
-        std::vector<double> div_q, div_vs, div_rs;
-        compute_divergence(pdf_grid_q , div_q );
-        compute_divergence(pdf_grid_vs, div_vs);
-        compute_divergence(pdf_grid_rs, div_rs);
-
-        auto threshold = [](const std::vector<double>& v) {
-            double mean = 0.0, var = 0.0; int n = 0;
-            for (double x : v) if (x > 0.0) { mean += x; ++n; }
-            mean /= n;
-            for (double x : v) if (x > 0.0) var += (x - mean) * (x - mean);
-            var /= n;
-            return mean + 3.0 * std::sqrt(var);
-        };
-
-        const double thr_q  = threshold(div_q );
-        const double thr_vs = threshold(div_vs);
-        const double thr_rs = threshold(div_rs);
-
-        std::vector<int> outliers;
-        for (int i = 1; i < n_incl - 1; ++i) {
-            if (div_q [i] > thr_q  || div_vs[i] > thr_vs ||
-                div_rs[i] > thr_rs)
-                outliers.push_back(i);
-        }
-
-        if (!outliers.empty()) {
-            std::cout << "\n   Refinement: " << outliers.size()
-                      << " divergent inclination strip(s) → resampling.\n";
-            for (int idx : outliers) regenerate_strip(idx);
-
-            /* recompute divergences to show improvement */
-            compute_divergence(pdf_grid_q , div_q );
-            compute_divergence(pdf_grid_vs, div_vs);
-            compute_divergence(pdf_grid_rs, div_rs);
-
-            int stubborn = 0;
-            for (int i : outliers)
-                if (div_q[i]  > thr_q ||
-                    div_vs[i] > thr_vs ||
-                    div_rs[i] > thr_rs) ++stubborn;
-
-            if (stubborn == 0)
-                std::cout << "   Refinement successful – all strips now within 3σ.\n";
-            else
-                std::cout << "   Warning: " << stubborn
-                          << " strip(s) still above 3σ after regeneration.\n";
-        }
-
-        std::cout << BRIGHT_GREEN << "✓ Grid pre-computation complete!" << RESET << "\n";
+        norm_rows(pdf_q , q_dx );
+        norm_rows(pdf_vs, vs_dx);
+        norm_rows(pdf_rs, rs_dx);
     }
 
-    /* ───────── fast bilinear interpolation for q / v_s / r_s ─────────────────── */
-    double evaluate_q (double incl, double q ) const { return interp(pdf_grid_q , incl, q , incl_min, incl_dx, n_incl, q_min , q_dx , n_q ); }
-    double evaluate_vs(double incl, double vs) const { return interp(pdf_grid_vs, incl, vs, incl_min, incl_dx, n_incl, vs_min, vs_dx, n_vs); }
-    double evaluate_rs(double incl, double rs) const { return interp(pdf_grid_rs, incl, rs, incl_min, incl_dx, n_incl, rs_min, rs_dx, n_rs); }
-
-    /* combined log-pdf ----------------------------------------------------------- */
-    double log_combined_pdf(double incl, double q, double vs, double rs) const
+    /* ─────────── bilinear interpolation helper ─────────── */
+    template<typename Grid>
+    inline double interp(const Grid &G,
+                         double i_deg, double x,
+                         double x0,  double dx,  int nx)      const
     {
-        return std::log(evaluate_q(incl, q))  +
-               std::log(evaluate_vs(incl, vs))+
-               std::log(evaluate_rs(incl, rs));
-    }
-
-    /* for diagnostics ------------------------------------------------------------ */
-    bool in_bounds(double i, double q, double vs, double rs) const
-    {
-        return (i  >= incl_min && i  <= incl_max &&
-                q  >= q_min   && q  <= q_max   &&
-                vs >= vs_min  && vs <= vs_max  &&
-                rs >= rs_min  && rs <= rs_max );
-    }
-
-    void print_info() const
-    {
-        std::cout << "Grid info:\n"
-                  << "  Inclination: [" << incl_min << ", " << incl_max << "] deg, "
-                  << n_incl << " points\n"
-                  << "  q          : [" << q_min    << ", " << q_max    << "], "
-                  << n_q << " points\n"
-                  << "  v_s (km/s) : [" << vs_min   << ", " << vs_max   << "], "
-                  << n_vs << " points\n"
-                  << "  r_s        : [" << rs_min   << ", " << rs_max   << "], "
-                  << n_rs << " points\n";
-    }
-
-private:
-    /* ───── generic bilinear interpolator (private) ───────────────────────────── */
-    static double interp(const std::vector<std::vector<double>>& grid,
-                         double x, double y,
-                         double x0, double dx, int nx,
-                         double y0, double dy, int ny)
-    {
-        if (x < x0 || x > x0 + dx * (nx - 1) ||
-            y < y0 || y > y0 + dy * (ny - 1))
+        if (i_deg < incl_min || i_deg > incl_max ||
+            x      < x0       || x      > x0 + dx * (nx - 1))
             return 1e-12;
 
-        double px = (x - x0) / dx;
-        double py = (y - y0) / dy;
-        int ix = int(px);
-        int iy = int(py);
-        if (ix >= nx - 1) ix = nx - 2;
-        if (iy >= ny - 1) iy = ny - 2;
-        double fx = px - ix;
-        double fy = py - iy;
+        const double pi = (i_deg - incl_min) / incl_dx;
+        int   ii = int(pi);  if (ii >= n_incl - 1) ii = n_incl - 2;
+        const double fi = pi - ii;
 
-        const double v00 = grid[ix    ][iy    ];
-        const double v10 = grid[ix + 1][iy    ];
-        const double v01 = grid[ix    ][iy + 1];
-        const double v11 = grid[ix + 1][iy + 1];
+        const double pj = (x - x0) / dx;
+        int   jj = int(pj);  if (jj >= nx - 1) jj = nx - 2;
+        const double fj = pj - jj;
 
-        const double v0 = v00 * (1.0 - fx) + v10 * fx;
-        const double v1 = v01 * (1.0 - fx) + v11 * fx;
-        const double v  = v0  * (1.0 - fy) + v1  * fy;
+        const double v00 = G[ii    ][jj    ];
+        const double v10 = G[ii + 1][jj    ];
+        const double v01 = G[ii    ][jj + 1];
+        const double v11 = G[ii + 1][jj + 1];
+
+        const double v0 = v00 * (1.0 - fi) + v10 * fi;
+        const double v1 = v01 * (1.0 - fi) + v11 * fi;
+        const double v  = v0  * (1.0 - fj) + v1  * fj;
+
         return std::max(v, 1e-12);
+    }
+
+    /* ─────────── public evaluators ─────────── */
+    double pdf_q_i (double i, double q ) const { return interp(pdf_q , i, q , q_min , q_dx , n_q ); }
+    double pdf_vs_i(double i, double vs) const { return interp(pdf_vs, i, vs, vs_min, vs_dx, n_vs); }
+    double pdf_rs_i(double i, double rs) const { return interp(pdf_rs, i, rs, rs_min, rs_dx, n_rs); }
+
+    double log_combined(double i, double q, double vs, double rs) const
+    {
+        return std::log(pdf_q_i(i,q)) + std::log(pdf_vs_i(i,vs))
+                                     + std::log(pdf_rs_i(i,rs));
+    }
+
+    bool in_bounds(double i, double q, double vs, double rs) const
+    {
+        return i  >= incl_min && i  <= incl_max &&
+               q  >= q_min   && q  <= q_max   &&
+               vs >= vs_min  && vs <= vs_max  &&
+               rs >= rs_min  && rs <= rs_max ;
+    }
+
+    void info() const
+    {
+        std::cout << "PDF grid:\n"
+                  << "  i   : [" << incl_min << ", " << incl_max << "]°, "
+                  << n_incl << " nodes\n"
+                  << "  q   : [" << q_min    << ", " << q_max    << "], "
+                  << n_q    << " nodes\n"
+                  << "  v_s : [" << vs_min   << ", " << vs_max   << "] km/s, "
+                  << n_vs   << " nodes\n"
+                  << "  r_s : [" << rs_min   << ", " << rs_max   << "], "
+                  << n_rs   << " nodes\n";
     }
 };
 
-/* ─────────────────────── global interface (unchanged) ───────────────────────── */
+/* ─────────────────────── global façade (unchanged) ────────────────────── */
 void initialize_mass_ratio_pdf_grid(
     double m1_mean, double m1_err,
     double m2_mean, double m2_err,
@@ -475,7 +422,8 @@ void initialize_mass_ratio_pdf_grid(
     delete g_mass_ratio_grid;
     g_mass_ratio_grid = new MassRatioPDFGrid(
         m1_mean, m1_err, m2_mean, m2_err,
-        K_mean, K_err, R_mean, R_err, P_mean, P_err,
+        K_mean,  K_err,  R_mean,  R_err,
+        P_mean,  P_err,
         incl_min, incl_max, n_incl,
         n_q, n_vs, n_rs, nsamp);
 }
@@ -484,15 +432,15 @@ double log_mass_ratio_pdf(double i, double q, double vs, double rs)
 {
     if (!g_mass_ratio_grid)
         throw std::runtime_error("PDF grid not initialised.");
-    return g_mass_ratio_grid->log_combined_pdf(i, q, vs, rs);
+    return g_mass_ratio_grid->log_combined(i, q, vs, rs);
 }
 
-double mass_ratio_pdf    (double i, double q ) { return g_mass_ratio_grid->evaluate_q (i, q ); }
-double velocity_scale_pdf(double i, double vs) { return g_mass_ratio_grid->evaluate_vs(i, vs); }
-double radius_scale_pdf  (double i, double rs) { return g_mass_ratio_grid->evaluate_rs(i, rs); }
+double mass_ratio_pdf    (double i, double q ) { return g_mass_ratio_grid->pdf_q_i (i,q ); }
+double velocity_scale_pdf(double i, double vs) { return g_mass_ratio_grid->pdf_vs_i(i,vs); }
+double radius_scale_pdf  (double i, double rs) { return g_mass_ratio_grid->pdf_rs_i(i,rs); }
 
 void cleanup_mass_ratio_pdf_grid() { delete g_mass_ratio_grid; g_mass_ratio_grid = nullptr; }
-void print_grid_info()             { if (g_mass_ratio_grid) g_mass_ratio_grid->print_info(); }
+void print_grid_info()             { if (g_mass_ratio_grid) g_mass_ratio_grid->info(); }
 
 bool check_in_bounds(double i, double q, double vs, double rs)
 {

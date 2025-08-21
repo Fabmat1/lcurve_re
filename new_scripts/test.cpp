@@ -49,11 +49,11 @@ int main() {
         m1_mean, m1_err, m2_mean, m2_err,
         K_mean, K_err, R_mean, R_err, P_mean, P_err,
         15.0, 90.0,    // inclination range [15, 90] degrees
-        100,            // inclination points
+        500,            // inclination points
         500,           // q points
         500,           // v_s points
         500,           // r_s points
-        100000          // samples for accuracy
+        100000000          // samples for accuracy
     );
     
     auto end_init = std::chrono::high_resolution_clock::now();
@@ -491,8 +491,8 @@ int main() {
         gp3 << "set ylabel 'Mass ratio  q'\n";
         gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
         gp3 << "set yrange [" << Q_MIN << ":" << Q_MAX << "]\n";
-        gp3 << "set logscale cb\n";
-        gp3 << "set cbrange [1e-2:2]\n";        // <-- colour scale only 10⁻4 … 2
+        //gp3 << "set logscale cb\n";
+        gp3 << "set cbrange [1e-2:0.7]\n";        // <-- colour scale only 10⁻4 … 2
         gp3 << "set cblabel 'PDF(i,q)'\n";
         gp3 << "unset key\n";
         gp3 << "set pm3d map\n";
@@ -503,6 +503,7 @@ int main() {
         gp3 << "set ylabel 'Radius-scale  r_s'\n";
         gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
         gp3 << "set yrange [" << RS_MIN << ":" << RS_MAX << "]\n";
+        gp3 << "set cbrange [0.1:100.0]\n";        // INDEPENDENT colorbar range for PDF(i,r_s)
         gp3 << "set cblabel 'PDF(i,r_s)'\n";
         gp3 << "splot $IRS_PDF using 1:2:3 notitle\n";
 
