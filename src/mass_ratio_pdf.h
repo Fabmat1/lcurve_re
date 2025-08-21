@@ -12,8 +12,8 @@ void initialize_mass_ratio_pdf_grid(
     double K_mean, double K_err,
     double R_mean, double R_err,
     double P_mean, double P_err,
-    double incl_min = 15.0, double incl_max = 90.0, int n_incl = 200,
-    int n_q = 500, int n_vs = 500, int n_rs = 500, int nsamp = 250000
+    double incl_min = 15.0, double incl_max = 90.0, int n_incl = 500,
+    int n_q = 500, int n_vs = 500, int n_rs = 500, int nsamp = 100000000
 );
 
 double log_mass_ratio_pdf(double inclination, double q, double v_s, double r_s);
