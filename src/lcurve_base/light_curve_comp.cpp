@@ -258,16 +258,16 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             fcomp[np][1] = slfac * comp_disc(mdl.iangle, mdl.lin_limb_disc,
                                              mdl.quad_limb_disc, phase, expose,
                                              data[np].ndiv, mdl.q,
-                                             mdl.velocity_scale, disc);
+                                             disc);
 
             fcomp[np][2] = slfac * comp_edge(mdl.iangle, mdl.lin_limb_disc,
                                              mdl.quad_limb_disc, phase, expose,
                                              data[np].ndiv, mdl.q,
-                                             mdl.velocity_scale, edge);
+                                             edge);
 
             fcomp[np][3] = slfac * comp_spot(mdl.iangle, phase, expose,
                                              data[np].ndiv, mdl.q,
-                                             mdl.velocity_scale, spot);
+                                             spot);
 
             if (mdl.t2 > 0)
                 fcomp[np][4] = slfac * comp_star2(mdl.iangle, ldc2, phase, expose,

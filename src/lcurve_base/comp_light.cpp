@@ -405,7 +405,7 @@ double Lcurve::comp_star2(double iangle, const LDC& ldc2, double phase, double e
  */
 
 double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_disc,
-                         double phase, double expose, int ndiv, double q, float vscale,
+                         double phase, double expose, int ndiv, double q,
                          const Subs::Buffer1D<Lcurve::Point>& disc){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
@@ -461,7 +461,7 @@ double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_d
  */
 
 double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_disc,
-                         double phase, double expose, int ndiv, double q, float vscale,
+                         double phase, double expose, int ndiv, double q,
                          const Subs::Buffer1D<Lcurve::Point>& edge){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
@@ -514,8 +514,7 @@ double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_d
  * \return the light curve value desired.
  */
 
-double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, double q,
-                         float vscale, const Subs::Buffer1D<Lcurve::Point>& spot){
+double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, double q, const Subs::Buffer1D<Lcurve::Point>& spot){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
     double ri = Subs::deg2rad(iangle);

@@ -35,7 +35,7 @@ int main(int argc, char* argv[]) {
     Lcurve::Data copy = data_copy_pair.second;
     bool no_file = data.empty();
 
-    double noise;
+    double noise = 0.0;
     if (no_file) {
         auto fake_data = Helpers::generate_fake_data(config["fake_data_file_path"]);
         data = fake_data;
@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
         Helpers::plot_model(data, fit, no_file, copy, device);
     }
 
-    for (int i = 0; i < data.size(); i++) {
+    for (long unsigned int i = 0; i < data.size(); i++) {
         data[i].flux = fit[i] + noise*Subs::gauss2(seed);
     }
 

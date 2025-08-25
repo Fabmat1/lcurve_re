@@ -66,7 +66,7 @@ void Roche::gsint(double q, Subs::Vec3 &r, Subs::Vec3 &v, double ttry,
 
    */
 
-void rocder(double t, double y[], double dydt[]){
+void rocder([[maybe_unused]] double t, double y[], double dydt[]){
 
     Subs::Vec3 r, v, a;
 

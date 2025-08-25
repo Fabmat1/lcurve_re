@@ -280,48 +280,6 @@ public:
             }
         }
 
-        /* -------------- bandwidths & Gaussian blur -------------------- */
-        /* bandwidth in physical units */
-        const auto weighted_stats = [&](auto accessor)->std::pair<double,double>
-        {
-            long double sum = 0, sum2 = 0, w = 0;
-            for (int i = 0; i < n_incl; ++i) {
-                for (double v : accessor(strips[i])) {
-                    sum  += v;
-                    sum2 += v * v;
-                    w    += 1;
-                }
-            }
-            const double mean = double(sum / w);
-            const double var  = double(sum2 / w) - mean * mean;
-            return {mean, std::sqrt(std::max(0.0, var))};
-        };
-
-        const auto [mi,  si ] = weighted_stats([&](const StripSamples &s){return std::vector<double>{};}); // dummy
-        /* We already know the inclination grid – its σ analytically:   */
-        const double incl_sigma = (incl_max - incl_min) / std::sqrt(12.0);   // uniform
-
-        const auto [mq , sq ] = weighted_stats([](const StripSamples&s){return s.q ;});
-        const auto [mvs, svs] = weighted_stats([](const StripSamples&s){return s.vs;});
-        const auto [mrs, srs] = weighted_stats([](const StripSamples&s){return s.rs;});
-
-        const std::size_t Ntot = all_q.size();   // total good samples
-
-        const double h_i  = scott_bw_2d(incl_sigma, Ntot);
-        const double h_q  = scott_bw_2d(sq , Ntot);
-        const double h_vs = scott_bw_2d(svs, Ntot);
-        const double h_rs = scott_bw_2d(srs, Ntot);
-
-        /* bandwidth in grid index units */
-        const double hi_idx  = h_i  / incl_dx;
-        const double hq_idx  = h_q  / q_dx;
-        const double hvs_idx = h_vs / vs_dx;
-        const double hrs_idx = h_rs / rs_dx;
-
-        /* Gaussian blur (separable) */
-        //gaussian_blur(Hq , hi_idx , hq_idx );
-        //gaussian_blur(Hvs, hi_idx , hvs_idx);
-        //gaussian_blur(Hrs, hi_idx , hrs_idx);
 
         /* --------- row-wise normalisation:  ∑ p(x|i) Δx = 1 ---------- */
         pdf_q  = Hq;  pdf_vs = Hvs; pdf_rs = Hrs;

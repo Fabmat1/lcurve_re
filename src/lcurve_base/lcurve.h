@@ -522,16 +522,16 @@ namespace Lcurve {
     //! Computes flux from disc
     double comp_disc(double iangle, double lin_limb_disc, double quad_limb_disc,
                      double phase, double expose, int ndiv, double q,
-                     float vscale, const Subs::Buffer1D<Lcurve::Point> &disc);
+                    const Subs::Buffer1D<Lcurve::Point> &disc);
 
     //! Computes flux from disc edge
     double comp_edge(double iangle, double lin_limb_disc, double quad_limb_disc,
                      double phase, double expose, int ndiv, double q,
-                     float vscale, const Subs::Buffer1D<Lcurve::Point> &edge);
+                     const Subs::Buffer1D<Lcurve::Point> &edge);
 
     //! Compute flux from spot
     double comp_spot(double iangle, double phase, double expose, int ndiv,
-                     double q, float vscale,
+                     double q,
                      const Subs::Buffer1D<Lcurve::Point> &spot);
 
     //! Compute flux-weighted gravity of star 1

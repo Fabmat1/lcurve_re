@@ -133,3 +133,78 @@ install(TARGETS lcurve_re lcurve_mcmc lcurve_simplex
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr/local" CACHE PATH "Default install prefix" FORCE)
 endif()
+
+# ─── OPTIONS ───────────────────────────────────────────────────────
+option(LCURVE_STRICT          "Fail the build on any warning"  ON)
+option(LCURVE_ENABLE_ASAN     "Build with address/UB sanitiser" OFF)
+
+# ─── BUILD TYPE DEFAULT ───────────────────────────────────────────
+# Only set a default when the user has not supplied -DCMAKE_BUILD_TYPE
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Debug/Release/RelWithDebInfo/MinSizeRel" FORCE)
+endif()
+
+# ─── COMPILER-SPECIFIC WARNING FLAGS  ─────────────────────────────
+set(_COMMON_WARNINGS "")
+set(_WERROR "")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    list(APPEND _COMMON_WARNINGS -Wall -Wextra -Wpedantic)
+elseif(MSVC)
+    list(APPEND _COMMON_WARNINGS /W4 /permissive-)
+endif()
+
+if(LCURVE_STRICT)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        list(APPEND _WERROR -Werror)
+    elseif(MSVC)
+        list(APPEND _WERROR /WX)
+    endif()
+endif()
+
+# ─── SANITISER FLAGS (only meaningful for Clang/GCC & no CUDA) ───
+set(_SAN_FLAGS "")
+if(LCURVE_ENABLE_ASAN AND NOT CUDA_FOUND
+   AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    list(APPEND _SAN_FLAGS -fsanitize=address,undefined
+                           -fno-omit-frame-pointer)
+endif()
+
+# ─── RELEASE-ONLY OPTIMISATION FLAGS ──────────────────────────────
+set(_RELEASE_FLAGS "-O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd")
+
+# ─── HELPER FUNCTION TO APPLY EVERYTHING TO A TARGET ──────────────
+function(lcurve_setup_target TGT)
+    # Core warnings
+    target_compile_options(${TGT} PRIVATE ${_COMMON_WARNINGS} ${_WERROR})
+
+    # Sanitiser flags (compile + link)
+    if(_SAN_FLAGS)
+        target_compile_options(${TGT} PRIVATE
+            $<$<CONFIG:Debug>:${_SAN_FLAGS}>)
+        target_link_options(${TGT}    PRIVATE
+            $<$<CONFIG:Debug>:${_SAN_FLAGS}>)
+    endif()
+
+    # Release optimisation flags
+    if(_RELEASE_FLAGS)
+        target_compile_options(${TGT} PRIVATE
+            $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
+        target_link_options(${TGT} PRIVATE
+            $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
+    endif()
+endfunction()
+
+# ─── APPLY THE RULES TO ALL PROJECT TARGETS ───────────────────────
+# (add every target you create here)
+set(_LCURVE_ALL_TARGETS
+    utilities
+    lcurve_re
+    lcurve_mcmc
+    lcurve_simplex
+    test)
+
+foreach(t ${_LCURVE_ALL_TARGETS})
+    if(TARGET ${t})
+        lcurve_setup_target(${t})
+    endif()
+endforeach()

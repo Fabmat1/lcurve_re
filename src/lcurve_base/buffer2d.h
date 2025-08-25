@@ -72,7 +72,7 @@ namespace Subs {
         int size() const { return nx_ * ny_; }
 
         //! Conversion to 2D C-type array
-        operator X ** const() const { return buff; }
+        operator X **() const { return buff; }
 
         //! Conversion to 2D C-type array
         operator X **() { return buff; }
@@ -101,7 +101,7 @@ namespace Subs {
         // classes.
 
         //! Returns pointer to 2D C-type array
-        X **const ptr() const { return buff; }
+        X **ptr() const { return buff; }
 
         //! Conversion to 2D C-type array
         X **ptr() { return buff; }

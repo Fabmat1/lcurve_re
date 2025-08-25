@@ -99,12 +99,3 @@ void Lcurve::Data::wrasc(const std::string& file) const {
         fout << i << std::endl;
 
 }
-
-std::istream& Lcurve::operator>>(std::istream& s, Point& p) {
-    throw Lcurve_Error("Attempt to use operator>>(std::istream& s, Point&) is an error");
-}
-
-//! Dummy ASCII output operator to allow use of Buffer1D
-std::ostream& Lcurve::operator<<(std::ostream& s, const Point& p) {
-    throw Lcurve_Error("Attempt to use operator<<(std::ostream& s, const Point&) is an error");
-}
