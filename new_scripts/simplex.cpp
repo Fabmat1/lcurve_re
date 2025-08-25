@@ -17,8 +17,8 @@ using Clock = chrono::steady_clock;
 // Objective function: compute chi-squared for given parameters
 static double compute_chisq(Lcurve::Model &model, const Lcurve::Data &data,
                             bool scale, bool have_data,
-                            Subs::Buffer1D<double> &sfac) {
-    Subs::Array1D<double> fit;
+                            vector<double> &sfac) {
+    vector<double> fit;
     double wd, chisq, wn, lg1, lg2, rv1, rv2;
     Lcurve::light_curve_comp(model, data, scale, have_data, false, sfac,
                              fit, wd, chisq, wn, lg1, lg2, rv1, rv2);
@@ -151,7 +151,7 @@ int main(int argc, char* argv[]) {
     // Initialize scales etc.
     int seed;
     bool scale;
-    Subs::Buffer1D<double> sfac;
+    vector<double> sfac;
     Helpers::load_seed_scale_sfac(config, false, model, seed, scale, sfac);
 
     // Get variable parameters
@@ -196,7 +196,8 @@ int main(int argc, char* argv[]) {
                                         << " = " << best[i] << endl;
 
     // Write output parameters, fit, and optionally plot
-    Subs::Array1D<double> best_arr(npar), best_fit;
+    Subs::Array1D<double> best_arr(npar);
+    vector<double> best_fit;
     for (int i = 0; i < npar; ++i) best_arr[i] = best[i];
     model.set_param(best_arr);
     // Prepare placeholders for unused outputs

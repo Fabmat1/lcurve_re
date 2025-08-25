@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 #include "../new_subs.h"
 #include "constants.h"
 #include "../lroche_base/roche.h"
@@ -23,7 +24,7 @@
  * \exception Exceptions are thrown if the specified radii over-fill the Roche lobes.
  */
 
-void Lcurve::set_bright_spot_grid(const Model& mdl, Subs::Buffer1D<Lcurve::Point>& spot){
+void Lcurve::set_bright_spot_grid(const Model& mdl, vector<Lcurve::Point>& spot){
 
     double r1, r2;
     mdl.get_r1r2(r1, r2);

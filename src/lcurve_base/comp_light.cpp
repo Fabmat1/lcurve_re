@@ -42,13 +42,13 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
                           double spin1, double spin2, float vscale,
                           bool glens1, double rlens1,
                           const Lcurve::Ginterp& gint,
-                          const Subs::Buffer1D<Lcurve::Point>& star1f,
-                          const Subs::Buffer1D<Lcurve::Point>& star2f,
-                          const Subs::Buffer1D<Lcurve::Point>& star1c,
-                          const Subs::Buffer1D<Lcurve::Point>& star2c,
-                          const Subs::Buffer1D<Lcurve::Point>& disc,
-                          const Subs::Buffer1D<Lcurve::Point>& edge,
-                          const Subs::Buffer1D<Lcurve::Point>& spot){
+                          const vector<Lcurve::Point>& star1f,
+                          const vector<Lcurve::Point>& star2f,
+                          const vector<Lcurve::Point>& star1c,
+                          const vector<Lcurve::Point>& star2c,
+                          const vector<Lcurve::Point>& disc,
+                          const vector<Lcurve::Point>& edge,
+                          const vector<Lcurve::Point>& spot){
 
     const double XCOFM = q/(1.+q);
     const double cosi  = cos(Constants::TWOPI*iangle/360.);
@@ -56,7 +56,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
     const double VFAC  = vscale/(Constants::C/1.e3);
 
     Subs::Vec3 earth, s;
-    int ptype, i, nelem1, nelem2, nd;
+    int ptype, nelem1, nelem2, nd;
     double sum=0., ssum, ssum2, mu, wgt, vr, phi, p, ph, mag, pd, d, phsq, rd;
     double vx, vy, vn, mud, ommu;
 
@@ -76,9 +76,9 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         earth = Roche::set_earth(cosi, sini, phi);
 
         ptype = gint.type(phi);
-        const Subs::Buffer1D<Lcurve::Point>& star1 = ptype == 1 ? star1f :
+        const vector<Lcurve::Point>& star1 = ptype == 1 ? star1f :
                                                      star1c;
-        const Subs::Buffer1D<Lcurve::Point>& star2 = ptype == 3 ? star2f :
+        const vector<Lcurve::Point>& star2 = ptype == 3 ? star2f :
                                                      star2c;
         nelem1 = star1.size();
         nelem2 = star2.size();
@@ -86,7 +86,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         ssum = 0.;
 
         // Star 1.
-        for(i=0; i<nelem1; i++){
+        for(int i=0; i<nelem1; i++){
             const Point& pt = star1[i];
             if(pt.visible(phi)){
                 mu = Subs::dot(earth, pt.dirn);
@@ -109,7 +109,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         // Star 2.
         ssum2 = 0.;
 
-        for(i=0; i<nelem2; i++){
+        for(int i=0; i<nelem2; i++){
             const Point& pt = star2[i];
             if(pt.visible(phi)){
                 mu = Subs::dot(earth, pt.dirn);
@@ -162,7 +162,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         ssum += gint.scale2(phi)*ssum2;
 
         // Disc
-        for(i=0; i<disc.size(); i++){
+        for(long unsigned int i=0; i<disc.size(); i++){
             mu = Subs::dot(earth, disc[i].dirn);
             if(mu > 0. && disc[i].visible(phi)){
                 ommu  = 1.-mu;
@@ -171,7 +171,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         }
 
         // Disc edge
-        for(i=0; i<edge.size(); i++){
+        for(long unsigned int i=0; i<edge.size(); i++){
             mu = Subs::dot(earth, edge[i].dirn);
             if(mu > 0. && edge[i].visible(phi)){
                 ommu = 1.-mu;
@@ -180,7 +180,7 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         }
 
         // Spot
-        for(i=0; i<spot.size(); i++){
+        for(long unsigned int i=0; i<spot.size(); i++){
             mu = Subs::dot(earth, spot[i].dirn);
             if(mu > 0. && spot[i].visible(phi))
                 ssum += mu*spot[i].flux;
@@ -214,8 +214,8 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
 double Lcurve::comp_star1(double iangle, const LDC& ldc1, double phase, double expose, int ndiv,
                           double q, double beam_factor1, float vscale,
                           const Lcurve::Ginterp& gint,
-                          const Subs::Buffer1D<Lcurve::Point>& star1f,
-                          const Subs::Buffer1D<Lcurve::Point>& star1c){
+                          const vector<Lcurve::Point>& star1f,
+                          const vector<Lcurve::Point>& star1c){
 
     const double XCOFM = q/(1.+q);
     double ri = Subs::deg2rad(iangle);
@@ -243,7 +243,7 @@ double Lcurve::comp_star1(double iangle, const LDC& ldc1, double phase, double e
         earth = Roche::set_earth(cosi, sini, phi);
 
         // Define the grid to use
-        const Subs::Buffer1D<Lcurve::Point>& star1 = gint.type(phi) == 1 ? star1f : star1c;
+        const vector<Lcurve::Point>& star1 = gint.type(phi) == 1 ? star1f : star1c;
         int nelem1 = star1.size();
 
         ssum = 0.;
@@ -299,8 +299,8 @@ double Lcurve::comp_star1(double iangle, const LDC& ldc1, double phase, double e
 double Lcurve::comp_star2(double iangle, const LDC& ldc2, double phase, double expose, int ndiv,
                           double q, double beam_factor2, float vscale, bool glens1,
                           double rlens1, const Lcurve::Ginterp& gint,
-                          const Subs::Buffer1D<Lcurve::Point>& star2f,
-                          const Subs::Buffer1D<Lcurve::Point>& star2c){
+                          const vector<Lcurve::Point>& star2f,
+                          const vector<Lcurve::Point>& star2c){
 
     const double XCOFM = q/(1.+q);
     double ri = Subs::deg2rad(iangle);
@@ -328,7 +328,7 @@ double Lcurve::comp_star2(double iangle, const LDC& ldc2, double phase, double e
         earth = Roche::set_earth(cosi, sini, phi);
 
         // Define the grid to use
-        const Subs::Buffer1D<Lcurve::Point>& star2 = gint.type(phi) == 3 ? star2f : star2c;
+        const vector<Lcurve::Point>& star2 = gint.type(phi) == 3 ? star2f : star2c;
         int nelem2 = star2.size();
 
         ssum = 0.;
@@ -406,7 +406,7 @@ double Lcurve::comp_star2(double iangle, const LDC& ldc2, double phase, double e
 
 double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_disc,
                          double phase, double expose, int ndiv, double q,
-                         const Subs::Buffer1D<Lcurve::Point>& disc){
+                         const vector<Lcurve::Point>& disc){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
     double ri = Subs::deg2rad(iangle);
@@ -432,7 +432,7 @@ double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_d
 
         ssum = 0.;
         // Disc
-        for(int i=0; i<disc.size(); i++){
+        for(long unsigned int i=0; i<disc.size(); i++){
             mu = Subs::dot(earth, disc[i].dirn);
             if(mu > 0. && disc[i].visible(phi))
                 ssum += mu*disc[i].flux*(1.-(1.-mu)*(lin_limb_disc+quad_limb_disc*(1.-mu)));
@@ -462,7 +462,7 @@ double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_d
 
 double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_disc,
                          double phase, double expose, int ndiv, double q,
-                         const Subs::Buffer1D<Lcurve::Point>& edge){
+                         const vector<Lcurve::Point>& edge){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
     double ri = Subs::deg2rad(iangle);
@@ -488,7 +488,7 @@ double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_d
 
         ssum = 0.;
         // Disc edge
-        for(int i=0; i<edge.size(); i++){
+        for(long unsigned int i=0; i<edge.size(); i++){
             mu = Subs::dot(earth, edge[i].dirn);
             if(mu > 0. && edge[i].visible(phi))
                 ssum += mu*edge[i].flux*(1.-(1.-mu)*(lin_limb_disc+quad_limb_disc*(1.-mu)));
@@ -514,7 +514,7 @@ double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_d
  * \return the light curve value desired.
  */
 
-double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, double q, const Subs::Buffer1D<Lcurve::Point>& spot){
+double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, double q, const vector<Lcurve::Point>& spot){
 
     const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
     double ri = Subs::deg2rad(iangle);
@@ -539,7 +539,7 @@ double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, do
 
         ssum = 0.;
         // Spot
-        for(int i=0; i<spot.size(); i++){
+        for(long unsigned int i=0; i<spot.size(); i++){
             mu = Subs::dot(earth, spot[i].dirn);
             if(mu > 0. && spot[i].visible(phi))
                 ssum += mu*spot[i].flux;

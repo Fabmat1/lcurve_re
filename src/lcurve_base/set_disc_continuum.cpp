@@ -19,12 +19,12 @@
 
 void Lcurve::set_disc_continuum(double rdisc, double tdisc, double texp,
 				double wave,
-				Subs::Buffer1D<Lcurve::Point>& disc){
+				vector<Lcurve::Point>& disc){
 
     // Reference surface brightness
     const double BRIGHT = Subs::planck(wave, tdisc);
 
-    for(int i=0; i<disc.size(); i++){
+    for(long unsigned int i=0; i<disc.size(); i++){
 	double r = disc[i].posn.length();
 	disc[i].flux = BRIGHT*pow(r/rdisc, texp)*disc[i].area;
     }
@@ -46,13 +46,13 @@ void Lcurve::set_disc_continuum(double rdisc, double tdisc, double texp,
 
 void Lcurve::set_edge_continuum(double tedge, double r2, double t2,
 				double absorb, double wave,
-				Subs::Buffer1D<Lcurve::Point>& edge){
+				vector<Lcurve::Point>& edge){
 
     Subs::Vec3 vec;
     const Subs::Vec3 cofm2(1.,0.,0.);
     double temp, geom, mu, r;
 
-    for(int i=0; i<edge.size(); i++){
+    for(long unsigned int i=0; i<edge.size(); i++){
         vec = cofm2 - edge[i].posn;
         r   = vec.length();
         mu  = Subs::dot(edge[i].dirn, vec)/r;

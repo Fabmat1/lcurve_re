@@ -1,234 +1,204 @@
+/**********************************************************************
+ *  svdfit.cpp  –  consolidated implementation that works with
+ *                 std::vector<std::vector<…>> instead of Buffer2D.
+ *
+ *  The three public overloads are identical to the originals from
+ *  the caller’s point of view, but the common logic now lives in the
+ *  template helper svdfit_core<>() further below.
+ *
+ *********************************************************************/
+
+#include <vector>
+#include <algorithm>   // std::max_element
 #include <string>
-#include "new_subs.h"
-#include "lcurve_base/buffer2d.h"
+#include "new_subs.h"  // defines rv, ddat, Subs_Error, svdcmp, svbksb, sqr, …
 
-/** svdfit uses singular value decomposition to solve linear
- * least squares problems. This is much safer than the "normal" equation
- * method as it can cope with degeneracy. The arguments
- * u, v and w can be used to obtain the covariance matrix. u will only
- * be ndat by n on output where ndat is the number of valid data points.
- *
- * \param data 1D data array. This includes the x values for convenience
- * of the calling routine rather than necessity. Points with negative
- * errors are ignored. ndata points.
- * \param a the nc fit coefficients
- * \param vect ndata by nc array of function values
- * \param u ndata by nc work array (it will be resized by the routine
- * if there are negative error bars)
- * \param v nc by nc work array (will be resized)
- * \param w nc element vector (will be resized)
- */
+namespace Subs {
 
-double Subs::svdfit(const Buffer1D<rv>& data, Buffer1D<float>& a, const Buffer2D<float>& vect, Buffer2D<float>& u,
-		    Buffer2D<float>& v, Buffer1D<float>& w){
+/*--------------------------------------------------------------------
+ *  Small internal helper – all the hard work is done only once here.
+ *------------------------------------------------------------------*/
+template <class Real, class DataCont, class RowBuilder, class ModelFunc>
+static Real svdfit_core(const DataCont&                  data,
+                        std::vector<Real>&               a,
+                        RowBuilder&&                     build_row,
+                        ModelFunc&&                      model_value,
+                        std::vector<std::vector<Real>>&  u,
+                        std::vector<std::vector<Real>>&  v,
+                        std::vector<Real>&               w)
+{
+    const std::size_t ndata = data.size();
+    const std::size_t nc    = a.size();
+    const Real        TOL   = Real(1e-5);
 
-    if(a.size() != vect.get_nx())
-	throw Subs_Error("svdfit[float]: number of coefficients = " + to_string(a.size()) +
-			 " in parameter vector does not match number in function array = " + to_string(vect.get_nx()));
-    if(data.size() != vect.get_ny())
-	throw Subs_Error("svdfit[float]: number of data = " + to_string(data.size()) +
-			 " does not match number in function array = " + to_string(vect.get_ny()));
+    /* -- number of valid (σ  > 0) points -- */
+    std::size_t ndat = 0;
+    for (const auto& d : data) if (d.z > 0) ++ndat;
 
-    size_t ndata = data.size();
-    size_t nc    = a.size();
-    size_t ndat = 0;
-    size_t i, j, k;
-    for(j=0; j<ndata; j++)
-	if(data[j].z>0.) ndat++;
-
-    u.resize(ndat,nc);
-    v.resize(nc,nc);
+    /* -- work arrays ------------------------------------------------ */
+    u.assign(ndat, std::vector<Real>(nc));   // ndat × nc
+    v.assign(nc,   std::vector<Real>(nc));   // nc   × nc
     w.resize(nc);
 
-    const float TOL = 1.e-5;
-    float tmp;
+    std::vector<Real> b(ndat);
 
-    Buffer1D<float> b(ndat);
-    for(i=0,k=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    tmp = 1./data[i].z;
-	    for(j=0; j<nc; j++)
-		u[k][j] = tmp*vect[i][j];
-	    b[k] = tmp*data[i].y;
-	    k++;
-	}
+    /* -- build weighted design matrix U and RHS b ------------------- */
+    std::size_t k = 0;
+    for (std::size_t i = 0; i < ndata; ++i) {
+        if (data[i].z > 0) {
+            const Real invsig = Real(1) / data[i].z;
+            build_row(i, k, invsig, u);          // fill U(k,·)
+            b[k++] = invsig * data[i].y;         // RHS
+        }
     }
 
+    /* -- singular-value decomposition ------------------------------- */
     svdcmp(u, w, v);
 
-    // Edit singular values
-    float wmax = 0.;
-    for(i=0; i<nc; i++)
-	if(w[i] > wmax) wmax = w[i];
+    /* -- edit tiny singular values ---------------------------------- */
+    const Real wmax   = *std::max_element(w.begin(), w.end());
+    const Real thresh = TOL * wmax;
+    for (auto& wi : w) if (wi < thresh) wi = Real(0);
 
-    float thresh = TOL*wmax;
-    for(i=0; i<nc; i++)
-	if(w[i] < thresh) w[i] = 0.;
-
-    // Carry on
+    /* -- solve and obtain coefficients ------------------------------ */
     svbksb(u, w, v, b, a);
 
-    double sum, chisq = 0.;
-
-    for(i=0,k=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    for(j=0, sum=0.; j<nc; j++)
-		sum += a[j]*vect[i][j];
-	    chisq += sqr((data[i].y-sum)/data[i].z);
-	}
+    /* -- χ² ---------------------------------------------------------- */
+    Real chisq = Real(0);
+    k = 0;
+    for (std::size_t i = 0; i < ndata; ++i) {
+        if (data[i].z > 0) {
+            const Real model = model_value(i, a);
+            chisq += sqr( (data[i].y - model) / data[i].z );
+        }
     }
     return chisq;
 }
 
-/** svdfit uses singular value decomposition to solve linear
- * least squares problems. This is much safer than the "normal" equation
- * method as it can cope with degeneracy. The arguments
- * u, v and w can be used to obtain the covariance matrix. u will only
- * be ndat by n on output where ndat is the number of valid data points.
- *
- * \param data 1D data array. This includes the x values for convenience
- * of the calling routine rather than necessity. Points with negative
- * errors are ignored. ndata points.
- * \param a the nc fit coefficients
- * \param vect ndata by nc array of function values
- * \param u ndata by nc work array (it will be resized by the routine
- * if there are negative error bars)
- * \param v nc by nc work array
- * \param w nc element vector
- */
+/*--------------------------------------------------------------------
+ *  1) float version, generic design matrix supplied in ‘vect’
+ *------------------------------------------------------------------*/
+double svdfit(const std::vector<rv>&                   data,
+              std::vector<float>&                      a,
+              const std::vector<std::vector<float>>&   vect,
+              std::vector<std::vector<float>>&         u,
+              std::vector<std::vector<float>>&         v,
+              std::vector<float>&                      w)
+{
+    if (vect.empty())
+        throw Subs_Error("svdfit[float]: function array is empty.");
 
-double Subs::svdfit(const Buffer1D<ddat>& data, Buffer1D<double>& a, const Buffer2D<double>& vect,
-		    Buffer2D<double>& u, Buffer2D<double>& v, Buffer1D<double>& w){
+    if (a.size() != vect[0].size())
+        throw Subs_Error("svdfit[float]: number of coefficients = " +
+                         std::to_string(a.size()) +
+                         " does not match number of columns in function array = " +
+                         std::to_string(vect[0].size()));
 
-    if(a.size() != vect.get_nx())
-	throw Subs_Error("svdfit[double]: number of coefficients = " + to_string(a.size()) +
-			 " in parameter vector does not match number in function array = " + to_string(vect.get_nx()));
-    if(data.size() != vect.get_ny())
-	throw Subs_Error("svdfit[double]: number of data = " + to_string(data.size()) +
-			 " does not match number in function array = " + to_string(vect.get_ny()));
+    if (data.size() != vect.size())
+        throw Subs_Error("svdfit[float]: number of data points = " +
+                         std::to_string(data.size()) +
+                         " does not match number of rows in function array = " +
+                         std::to_string(vect.size()));
 
-    size_t ndata = data.size();
-    size_t nc    = a.size();
-    size_t ndat = 0;
-    size_t i, j, k;
-    for(j=0; j<ndata; j++)
-	if(data[j].z>0.) ndat++;
+    /* ---- callable that fills one row of U ------------------------- */
+    auto build_row = [&](std::size_t i, std::size_t k, float invsig,
+                         std::vector<std::vector<float>>& U)
+    {
+        for (std::size_t j = 0; j < a.size(); ++j)
+            U[k][j] = invsig * vect[i][j];
+    };
 
-    u.resize(ndat,nc);
-    v.resize(nc,nc);
-    w.resize(nc);
+    /* ---- callable that returns the model value for χ² ------------- */
+    auto model_value = [&](std::size_t i, const std::vector<float>& aa)->float
+    {
+        float sum = 0.f;
+        for (std::size_t j = 0; j < aa.size(); ++j)
+            sum += aa[j] * vect[i][j];
+        return sum;
+    };
 
-    const double TOL = 1.e-5;
-    double tmp;
-
-    Buffer1D<double> b(ndat);
-    for(i=0,k=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    tmp = 1./data[i].z;
-	    for(j=0; j<nc; j++)
-		u[k][j] = tmp*vect[i][j];
-	    b[k] = tmp*data[i].y;
-	    k++;
-	}
-    }
-
-    svdcmp(u, w, v);
-
-    // Edit singular values
-    double wmax = 0.;
-    for(i=0; i<nc; i++)
-	if(w[i] > wmax) wmax = w[i];
-
-    double thresh = TOL*wmax;
-    for(i=0; i<nc; i++)
-	if(w[i] < thresh) w[i] = 0.;
-
-    // Carry on
-    svbksb(u, w, v, b, a);
-
-    double sum, chisq = 0.;
-
-    for(i=0,k=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    for(j=0, sum=0.; j<nc; j++)
-		sum += a[j]*vect[i][j];
-	    chisq += sqr((data[i].y-sum)/data[i].z);
-	}
-    }
-    return chisq;
+    return svdfit_core<float>(data, a, build_row, model_value, u, v, w);
 }
 
-/** Fits sinusoid using singular value decomposition.
- * \param data 1D data array. This includes the x values for convenience
- * of the calling routine rather than necessity. Points with negative
- * errors are ignored. ndata points.
- * \param a The nc fit coefficients
- * \param cosine ndata array of cosine values
- * \param sine ndata array of sine values
- * \param u ndata by nc work array (it will be resized by the routine
- * if there are negative error bars)
- * \param v nc by nc work array
- * \param w nc element vector
- */
+/*--------------------------------------------------------------------
+ *  2) double version, generic design matrix supplied in ‘vect’
+ *------------------------------------------------------------------*/
+double svdfit(const std::vector<ddat>&                  data,
+              std::vector<double>&                      a,
+              const std::vector<std::vector<double>>&   vect,
+              std::vector<std::vector<double>>&         u,
+              std::vector<std::vector<double>>&         v,
+              std::vector<double>&                      w)
+{
+    if (vect.empty())
+        throw Subs_Error("svdfit[double]: function array is empty.");
 
-double Subs::svdfit(const Buffer1D<rv>& data, Buffer1D<float>& a,
-		    const Buffer1D<double>& cosine, const Buffer1D<double>& sine,
-		    Buffer2D<float>& u, Buffer2D<float>& v, Buffer1D<float>& w){
+    if (a.size() != vect[0].size())
+        throw Subs_Error("svdfit[double]: number of coefficients = " +
+                         std::to_string(a.size()) +
+                         " does not match number of columns in function array = " +
+                         std::to_string(vect[0].size()));
 
-    size_t ndata = data.size();
-    size_t nc    = a.size();
-    if(nc != 3) throw Subs_Error("Expected 3 coefficients in sinusoid svdfit");
-    size_t ndat = 0;
-    size_t i, k;
-    for(i=0; i<ndata; i++)
-	if(data[i].z>0.) ndat++;
+    if (data.size() != vect.size())
+        throw Subs_Error("svdfit[double]: number of data points = " +
+                         std::to_string(data.size()) +
+                         " does not match number of rows in function array = " +
+                         std::to_string(vect.size()));
 
-    u.resize(ndat,nc);
-    v.resize(nc,nc);
-    w.resize(nc);
+    auto build_row = [&](std::size_t i, std::size_t k, double invsig,
+                         std::vector<std::vector<double>>& U)
+    {
+        for (std::size_t j = 0; j < a.size(); ++j)
+            U[k][j] = invsig * vect[i][j];
+    };
 
-    const float TOL = 1.e-5;
-    float tmp;
+    auto model_value = [&](std::size_t i, const std::vector<double>& aa)->double
+    {
+        double sum = 0.0;
+        for (std::size_t j = 0; j < aa.size(); ++j)
+            sum += aa[j] * vect[i][j];
+        return sum;
+    };
 
-    Buffer1D<float> b(ndat);
-    for(i=0,k=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    tmp     = 1./data[i].z;
-	    u[k][0] = tmp;
-	    u[k][1] = tmp*cosine[i];
-	    u[k][2] = tmp*sine[i];
-	    b[k]    = tmp*data[i].y;
-	    k++;
-	}
-    }
-
-    svdcmp(u, w, v);
-
-    // Edit singular values
-    float wmax = 0.;
-    for(i=0; i<nc; i++)
-	if(w[i] > wmax) wmax = w[i];
-
-    float thresh = TOL*wmax;
-    for(i=0; i<nc; i++)
-	if(w[i] < thresh) w[i] = 0.;
-
-    // Carry on
-    svbksb(u, w, v, b, a);
-
-    double sum, chisq = 0.;
-
-    for(i=0; i<ndata; i++){
-	if(data[i].z>0.){
-	    sum    = a[0] + a[1]*cosine[i] + a[2]*sine[i];
-	    chisq += sqr((data[i].y-sum)/data[i].z);
-	}
-    }
-    return chisq;
+    return svdfit_core<double>(data, a, build_row, model_value, u, v, w);
 }
 
+/*--------------------------------------------------------------------
+ *  3) float version specialised for a 3-parameter sinusoid
+ *------------------------------------------------------------------*/
+double svdfit(const std::vector<rv>&            data,
+              std::vector<float>&               a,
+              const std::vector<double>&        cosine,
+              const std::vector<double>&        sine,
+              std::vector<std::vector<float>>&  u,
+              std::vector<std::vector<float>>&  v,
+              std::vector<float>&               w)
+{
+    const std::size_t ndata = data.size();
+    if (a.size() != 3)
+        throw Subs_Error("svdfit[sinusoid]: exactly 3 coefficients expected.");
 
+    if (cosine.size() != ndata || sine.size() != ndata)
+        throw Subs_Error("svdfit[sinusoid]: cosine/sine arrays must have the same length as data.");
 
+    /* --- build one row of U --------------------------------------- */
+    auto build_row = [&](std::size_t i, std::size_t k, float invsig,
+                         std::vector<std::vector<float>>& U)
+    {
+        U[k][0] = invsig;
+        U[k][1] = invsig * static_cast<float>(cosine[i]);
+        U[k][2] = invsig * static_cast<float>(sine[i]);
+    };
 
+    /* --- corresponding model value -------------------------------- */
+    auto model_value = [&](std::size_t i, const std::vector<float>& aa)->float
+    {
+        return aa[0] +
+               aa[1] * static_cast<float>(cosine[i]) +
+               aa[2] * static_cast<float>(sine[i]);
+    };
 
+    return svdfit_core<float>(data, a, build_row, model_value, u, v, w);
+}
 
+}   // namespace Subs

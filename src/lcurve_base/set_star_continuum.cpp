@@ -24,8 +24,8 @@
  */
 
 void Lcurve::set_star_continuum(const Model& mdl,
-                                Subs::Buffer1D<Lcurve::Point>& star1,
-                                Subs::Buffer1D<Lcurve::Point>& star2){
+                                vector<Lcurve::Point>& star1,
+                                vector<Lcurve::Point>& star2){
 
     double r1, r2;
     mdl.get_r1r2(r1, r2);

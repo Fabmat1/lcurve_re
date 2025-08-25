@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 #include "../new_subs.h"
 #include "constants.h"
 #include "../lroche_base/roche.h"
@@ -12,13 +13,13 @@
  * \return the value of volume-averaged R1/a
  */
 
-double Lcurve::comp_radius1(const Subs::Buffer1D<Lcurve::Point>& star1){
+double Lcurve::comp_radius1(const vector<Lcurve::Point>& star1){
 
     Subs::Vec3 vec, cofm1(0.,0.,0.);
     double sumsa=0., sumvol=0., r, rcosa;
 
     // Star 1.
-    for(int i=0; i<star1.size(); i++){
+    for(long unsigned int i=0; i<star1.size(); i++){
         const Point& pt = star1[i];
         vec = pt.posn-cofm1;
         r = vec.length();
@@ -38,13 +39,13 @@ double Lcurve::comp_radius1(const Subs::Buffer1D<Lcurve::Point>& star1){
  * \return the value of volume-averaged R2/a
  */
 
-double Lcurve::comp_radius2(const Subs::Buffer1D<Lcurve::Point>& star2){
+double Lcurve::comp_radius2(const vector<Lcurve::Point>& star2){
 
     Subs::Vec3 vec, cofm2(1.,0.,0.);
     double sumsa=0., sumvol=0., r, rcosa;
 
     // Star 2.
-    for(int i=0; i<star2.size(); i++){
+    for(long unsigned int i=0; i<star2.size(); i++){
         const Point& pt = star2[i];
         vec = pt.posn-cofm2;
         r = vec.length();

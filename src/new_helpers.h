@@ -15,7 +15,7 @@ using namespace std;
 
 namespace Helpers {
     void plot_model(Lcurve::Data data,
-                    Subs::Array1D<double> fit,
+                    vector<double> fit,
                     bool no_file,
                     Lcurve::Data copy,
                     const string &device) {
@@ -140,7 +140,7 @@ namespace Helpers {
 
 
     void plot_model_live(Lcurve::Data data,
-                         Subs::Array1D<double> fit,
+                         vector<double> fit,
                          bool no_file,
                          Lcurve::Data copy,
                          Gnuplot &gp) {
@@ -310,7 +310,7 @@ namespace Helpers {
     }
 
     void load_seed_scale_sfac(const json &config, bool no_file, const Lcurve::Model &model,
-                              int32_t &seed, bool &scale, Subs::Buffer1D<double> &sfac) {
+                              int32_t &seed, bool &scale, vector<double> &sfac) {
         // Load seed and ensure it is negative
         seed = config["seed"].get<int32_t>();
         if (seed > 0) seed = -seed;

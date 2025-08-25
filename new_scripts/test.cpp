@@ -89,10 +89,10 @@ int main() {
     
     auto start_perf = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < n_eval; ++i) {
-        double test_q = q_eval + i * 0.00001;
-        double test_vs = vs_eval + i * 0.001;
-        double test_rs = rs_eval + i * 0.000001;
-        double log_pdf = log_mass_ratio_pdf(test_inclination, test_q, test_vs, test_rs);
+        [[ maybe_unused ]] double test_q = q_eval + i * 0.00001;
+        [[ maybe_unused ]] double test_vs = vs_eval + i * 0.001;
+        [[ maybe_unused ]] double test_rs = rs_eval + i * 0.000001;
+        [[ maybe_unused ]] double log_pdf = log_mass_ratio_pdf(test_inclination, test_q, test_vs, test_rs);
     }
     auto end_perf = std::chrono::high_resolution_clock::now();
     auto perf_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_perf - start_perf);
@@ -299,8 +299,8 @@ int main() {
         
         // Adjust ranges based on inclination (v_s depends strongly on sin(i))
         double sin_incl = sin(incl * M_PI / 180.0);
-        double vs_center = (1+1/q_eval)*K_mean / sin_incl;
-        double vs_range = (1+1/q_eval)*5 * K_err / sin_incl;
+        [[ maybe_unused ]] double vs_center = (1+1/q_eval)*K_mean / sin_incl;
+        [[ maybe_unused ]] double vs_range = (1+1/q_eval)*5 * K_err / sin_incl;
         
         // Mass ratio curves: 0 to 10
         for (int i = 0; i < n_curve; ++i) {

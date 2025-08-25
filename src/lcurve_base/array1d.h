@@ -1,532 +1,219 @@
-#ifndef ARRAY1D_H
-#define ARRAY1D_H
+// Array1D.hpp
+#pragma once
 
-#include <cmath>
-#include <string>
-#include <vector>
 #include <algorithm>
-#include <fstream>
-#include "../new_subs.h"
-
-using namespace std;
-
+#include <cmath>
+#include <cstddef>
+#include <numeric>
+#include <ranges>
+#include <span>
+#include <stdexcept>
+#include <vector>
 
 namespace Subs {
-    //! Template 1D array class
 
-    /**
-     * Subs::Array1D<X> is a template 1D numerical array class based upon
-     * the memory handling object Buffer1D. This class should be used if you want
-     * to add, subtract, multiply etc vectors (and the data type X can support it).
-     * This typically means that you can use Array1D for X=float, double etc but not
-     * more complex types. For the latter Buffer1D is the usual choice.
-     */
-    // Base error class
+template<typename T>
+class Array1D {
+public:
+    using value_type      = T;
+    using container_type  = std::vector<T>;
+    using size_type       = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using reference       = value_type&;
+    using const_reference = const value_type&;
+    using iterator        = typename container_type::iterator;
+    using const_iterator  = typename container_type::const_iterator;
 
+    /* construction ------------------------------------------------------------------ */
 
-    template<class X>
-    class Array1D : public Buffer1D<X> {
-    public:
-        //! Default constructor
-        Array1D() : Buffer1D<X>() {
-        }
+    Array1D() = default;
+    explicit Array1D(size_type n)               : data_(n)                    {}
+    explicit Array1D(container_type v)          : data_(std::move(v))         {}
+    Array1D(std::initializer_list<T> il)        : data_(il)                   {}
 
-        //! Constructor of an npix element vector
-        Array1D(int npix) : Buffer1D<X>(npix) {
-        }
+    template<std::ranges::input_range R>
+    explicit Array1D(R&& r)
+        : data_(std::ranges::begin(r), std::ranges::end(r)) {}
 
-        //! Constructs an npix element vector but with memory up to nmem
-        Array1D(int npix, int nmem) : Buffer1D<X>(npix, nmem) {
-        }
+    /* basic container interface ------------------------------------------------------ */
 
-        //! Copy constructor
-        Array1D(const Array1D &obj) : Buffer1D<X>(obj) {
-        }
+    [[nodiscard]] size_type  size()   const noexcept { return data_.size(); }
+    [[nodiscard]] bool       empty()  const noexcept { return data_.empty(); }
+    [[nodiscard]] reference       operator[](size_type i)       { return data_[i]; }
+    [[nodiscard]] const_reference operator[](size_type i) const { return data_[i]; }
+    [[nodiscard]] T*       data()       noexcept { return data_.data(); }
+    [[nodiscard]] const T* data() const noexcept { return data_.data(); }
 
-        //! Constructs an Array from a vector
-        template<class Y>
-        Array1D(const std::vector<Y> &vec);
+    iterator       begin()  noexcept { return data_.begin();  }
+    const_iterator begin()  const noexcept { return data_.begin();  }
+    iterator       end()    noexcept { return data_.end();    }
+    const_iterator end()    const noexcept { return data_.end();    }
 
-        //! Constructor from an ordinary array
-        template<class Y>
-        Array1D(int npix, const Y *vec);
+    // growth / size mgmt
+    void      reserve(size_type n)           { data_.reserve(n); }
+    void      resize (size_type n)           { data_.resize (n); }
+    size_type capacity()               const { return data_.capacity(); }
+    void      clear()                        { data_.clear(); }
 
-        //! Constructor from a function of the array index
-        template<class Y>
-        Array1D(int npix, const Y &func);
+    // element insertion
+    void push_back(const T& v)               { data_.push_back(v); }
+    void push_back(T&& v)                    { data_.push_back(std::move(v)); }
 
-        //! Constructor from a file
-        Array1D(const std::string &file) : Buffer1D<X>(file) {
-        };
-
-        //! Assign to a constant
-        Array1D<X> &operator=(const X &con);
-
-        //! Addition of a constant, in place
-        void operator+=(const X &con);
-
-        //! Subtraction of a constant, in place
-        void operator-=(const X &con);
-
-        //! Division by a constant, in place
-        void operator/=(const X &con);
-
-        //! Multiplication by a constant, in place
-        void operator*=(const X &con);
-
-        //! Addition of another array, in place
-        template<class Y>
-        void operator+=(const Array1D<Y> &vec);
-
-        //! Subtraction of another array, in place
-        template<class Y>
-        void operator-=(const Array1D<Y> &vec);
-
-        //! Multiplication by another array, in place
-        template<class Y>
-        void operator*=(const Array1D<Y> &vec);
-
-        //! Division by another array, in place
-        template<class Y>
-        void operator/=(const Array1D<Y> &vec);
-
-        //! Returns maximum value
-        X max() const;
-
-        //! Returns minimum value
-        X min() const;
-
-        //! Takes cosine of array
-        void cos();
-
-        //! Takes sine of array
-        void sin();
-
-        //! Determines whether values are monotonic
-        bool monotonic() const;
-
-        //! Locate a value in an ordered array
-        void hunt(const X &x, int &jhi) const;
-
-        //! Locate a value in an ordered array
-        unsigned long locate(const X &x) const;
-
-        //! Sorts an array into ascending order and returns a key to the original order
-        Buffer1D<unsigned long int> sort();
-
-        //! Return percentile (pcent from 0 to 100)
-        X centile(double pcent);
-
-        //! Return value of k-th smallest element (scrambles element order!)
-        X select(int k);
-
-        //! Returns median (scrambles element order!)
-        X median();
-
-        //! Returns sum
-        X sum() const;
-
-        //! Returns mean
-        X mean() const;
-
-        //! Returns length in Euclidean sense
-        X length() const;
-    };
-
-    //! Error class
-    class Array1D_Error : public Subs_Error {
-    public:
-        Array1D_Error() : Subs_Error("") {
-        };
-
-        Array1D_Error(const std::string &str) : Subs_Error(str) {
-        };
-    };
-
-    /** Constructor of an Array1D from the STL vector class. It must be
-     * possible to assign the two types to each other.
-     * \param vec the vector to construct from. The Array1D will have the same number
-     * of elements with the same values as the vector.
-     */
-    template<class X>
-    template<class Y>
-    Array1D<X>::Array1D(const std::vector<Y> &vec) : Buffer1D<X>(vec.size()) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = vec[i];
+    template<typename... Args>
+    T& emplace_back(Args&&... args) {
+        return data_.emplace_back(std::forward<Args>(args)...);
     }
 
-    /** Constructor of an Array1D from a standard C-like array. It must be
-     * possible to assign the two types to each other.
-     * \param vec the vector to construct from. The Array1D will have the same number
-     * of elements with the same values as the vector.
-     */
-    template<class X>
-    template<class Y>
-    Array1D<X>::Array1D(int npix, const Y *vec) : Buffer1D<X>(npix) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = vec[i];
+    /* element-wise arithmetic with a scalar ------------------------------------------ */
+
+    Array1D& operator+=(const T& c) { for (auto& e : data_) e += c; return *this; }
+    Array1D& operator-=(const T& c) { for (auto& e : data_) e -= c; return *this; }
+    Array1D& operator*=(const T& c) { for (auto& e : data_) e *= c; return *this; }
+    Array1D& operator/=(const T& c) { for (auto& e : data_) e /= c; return *this; }
+
+    /* element-wise arithmetic with another array ------------------------------------- */
+
+    template<typename U>
+    Array1D& operator+=(const Array1D<U>& rhs) { apply(rhs, std::plus<>{});  return *this; }
+    template<typename U>
+    Array1D& operator-=(const Array1D<U>& rhs) { apply(rhs, std::minus<>{}); return *this; }
+    template<typename U>
+    Array1D& operator*=(const Array1D<U>& rhs) { apply(rhs, std::multiplies<>{}); return *this; }
+    template<typename U>
+    Array1D& operator/=(const Array1D<U>& rhs) { apply(rhs, std::divides<>{});    return *this; }
+
+    /* math helpers ------------------------------------------------------------------- */
+
+    [[nodiscard]] T max()   const { return *std::ranges::max_element(data_); }
+    [[nodiscard]] T min()   const { return *std::ranges::min_element(data_); }
+    [[nodiscard]] T sum()   const { return std::accumulate(begin(), end(), T{}); }
+    [[nodiscard]] T mean()  const { return empty() ? T{} : sum() / static_cast<T>(size()); }
+
+    [[nodiscard]] T length() const
+    {
+        return std::sqrt(std::transform_reduce(begin(), end(), T{}, std::plus<>{},
+                                               [](T v) { return v * v; }));
     }
 
-    /** Constructor of an Array1D from a function of the pixel index, with the first
-     * pixel = 0.
-     * \param func the function to construct from. The function must support a call of the
-     * form func(int i) which returns the value at pixel i. Here is an example of a function (as
-     * a function object class) that adds a simple offset
-     * class Func {
-     * public:
-     * Func(int off) : offset(off) {}
-     * int operator()(int i) const {return i+offset;}
-     * private:
-     * int offset;
-     *};
-     */
-    template<class X>
-    template<class Y>
-    Array1D<X>::Array1D(int npix, const Y &func) : Buffer1D<X>(npix) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = func(i);
+    bool monotonic() const
+    {
+        return std::ranges::is_sorted(data_) ||
+               std::ranges::is_sorted(data_, std::greater<>{});
     }
 
-    // Operations with constants
-    template<class X>
-    void Array1D<X>::operator+=(const X &con) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] += con;
+    /* percentiles & selection -------------------------------------------------------- */
+
+    // k-th smallest (0-based), scrambles the copy, NOT the original
+    T select(size_type k) const
+    {
+        if (k >= size()) throw std::out_of_range("select(): k out of range");
+        container_type tmp = data_;
+        std::nth_element(tmp.begin(), tmp.begin() + k, tmp.end());
+        return tmp[k];
     }
 
-    template<class X>
-    void Array1D<X>::operator-=(const X &con) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] -= con;
+    T centile(double p) const
+    {
+        if (empty()) throw std::runtime_error("centile() on empty array");
+        p = std::clamp(p, 0.0, 100.0);
+        size_type k = static_cast<size_type>(p / 100.0 * static_cast<double>(size() - 1));
+        return select(k);
     }
 
-    template<class X>
-    void Array1D<X>::operator*=(const X &con) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] *= con;
+    T median() const
+    {
+        if (empty()) throw std::runtime_error("median() on empty array");
+        const size_type mid = size() / 2;
+        if (size() % 2 == 1) return select(mid);
+        return (select(mid - 1) + select(mid)) / T{2};
     }
 
-    template<class X>
-    void Array1D<X>::operator/=(const X &con) {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] /= con;
+    /* sort and permutation key ------------------------------------------------------- */
+
+    // Sorts *in place* and returns the permutation used.
+    std::vector<size_type> sort()
+    {
+        std::vector<size_type> idx(size());
+        std::iota(idx.begin(), idx.end(), 0);
+
+        std::sort(idx.begin(), idx.end(),
+                  [this](size_type i, size_type j) { return data_[i] < data_[j]; });
+
+        container_type sorted(data_.size());
+        for (size_type i = 0; i < size(); ++i) sorted[i] = data_[idx[i]];
+        data_.swap(sorted);
+        return idx;
     }
 
-    // Returns maximum value
-    template<class X>
-    X Array1D<X>::max() const {
-        if (this->size() == 0)
-            throw Array1D_Error("X Array1D<X>::max(): null array, cannot take maximum");
+    /* locate / hunt ------------------------------------------------------------------ */
 
-        X vmax = this->buff[0];
-        for (int i = 1; i < this->size(); i++)
-            vmax = vmax < this->buff[i] ? this->buff[i] : vmax;
-        return vmax;
-    }
+    // position of the first element that is >= x  (ascending)  / > x  (descending)
+    size_type locate(const T& x) const
+    {
+        if (!monotonic())
+            throw std::logic_error("locate(): array is not monotonic");
 
-    // Returns minimum value
-    template<class X>
-    X Array1D<X>::min() const {
-        if (this->size() == 0)
-            throw Array1D_Error("X Array1D<X>::min(): null array, cannot take minimum");
-
-        X vmin = this->buff[0];
-        for (int i = 1; i < this->size(); i++)
-            vmin = vmin > this->buff[i] ? this->buff[i] : vmin;
-        return vmin;
-    }
-
-    /** This function returns the value of the k-th smallest element of an Array1D. It uses
-     * a routine that scrambles the order for speed. Copy the Array1D first if the
-     * order is important to you. The operation can be done by sorting, but this is faster
-     * if you only want a single value.
-     */
-    template<class X>
-    X Array1D<X>::select(int k) {
-        return Subs::select(this->buff, this->size(), k);
-    }
-
-    /** This function returns the value of a percentile of an Array1D. It uses
-     * a routine that scrambles the order for speed. Copy the Array1D first if the
-     * order is important to you. The operation can be done by sorting, but this is faster
-     * if you only want a single value.
-     */
-    template<class X>
-    X Array1D<X>::centile(double pcent) {
-        int k = int(pcent / 100 * this->size());
-        k = k < 0 ? 0 : k;
-        k = k < this->size() ? k : this->size() - 1;
-        return Subs::select(this->buff, this->size(), k);
-    }
-
-    /** This function computes the median. It uses 'select' which scrambles the order.
-     * Copy the Array1D first if the order is important to you. The median is clearly defined
-     * for odd numbers of elements; for even numbers this routine averages the two middle values
-     * (thus requiring two calls to 'select'and therefore slower than a similar odd number case.
-     */
-    template<class X>
-    X Array1D<X>::median() {
-        if (this->size() % 2 == 0) {
-            return (Subs::select(this->buff, this->size(), this->size() / 2 - 1) +
-                    Subs::select(this->buff, this->size(), this->size() / 2)) / 2;
-        } else {
-            return Subs::select(this->buff, this->size(), this->size() / 2);
+        if (data_.front() <= data_.back()) {          // ascending
+            return std::ranges::lower_bound(data_, x) - begin();
+        } else {                                      // descending
+            return std::ranges::lower_bound(data_, x, std::greater<>{}) - begin();
         }
     }
 
-    /** This function computes the mean. It returns zero if there are no elements
-     *
-     */
-    template<class X>
-    X Array1D<X>::mean() const {
-        X sum = 0;
-        if (this->size()) {
-            for (int i = 0; i < this->size(); i++)
-                sum += this->buff[i];
-            sum /= this->size();
-        }
-        return sum;
+    /* trigonometric transforms ------------------------------------------------------- */
+
+    void to_cos() { transform_inplace([](T v){ return std::cos(v); }); }
+    void to_sin() { transform_inplace([](T v){ return std::sin(v); }); }
+
+private:
+    container_type data_;
+
+    /* helpers ------------------------------------------------------------------------ */
+
+    template<typename U, typename Op>
+    void apply(const Array1D<U>& rhs, Op op)
+    {
+        if (size() != rhs.size())
+            throw std::length_error("Array size mismatch");
+        for (size_type i = 0; i < size(); ++i)
+            data_[i] = op(data_[i], rhs[i]);
     }
 
-    /** This function computes the sum. It returns zero if there are no elements
-     *
-     */
-    template<class X>
-    X Array1D<X>::sum() const {
-        X sum = 0;
-        if (this->size()) {
-            for (int i = 0; i < this->size(); i++)
-                sum += this->buff[i];
-        }
-        return sum;
-    }
-
-    /** This function computes the length as the square root of the sum of squares
-     */
-    template<class X>
-    X Array1D<X>::length() const {
-        X sum = 0;
-        for (int i = 0; i < this->size(); i++)
-            sum += this->buff[i] * this->buff[i];
-        return sqrt(sum);
-    }
-
-    // Operations with other arrays
-    template<class X>
-    template<class Y>
-    void Array1D<X>::operator+=(const Array1D<Y> &vec) {
-        if (this->size() != vec.size())
-            throw Array1D_Error(
-                "void Array1D<X>::operator+=(const Array1D<Y>& vec): incompatible numbers of elements, " + Subs::str(
-                    this->size()) +
-                " versus " + Subs::str(vec.size()));
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] += vec.buff[i];
-    }
-
-    template<class X>
-    template<class Y>
-    void Array1D<X>::operator-=(const Array1D<Y> &vec) {
-        if (this->size() != vec.size())
-            throw Array1D_Error(
-                "void Array1D<X>::operator-=(const Array1D<Y>& vec): incompatible numbers of elements, " + Subs::str(
-                    this->size()) +
-                " versus " + Subs::str(vec.size()));
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] -= vec.buff[i];
-    }
-
-    template<class X>
-    template<class Y>
-    void Array1D<X>::operator*=(const Array1D<Y> &vec) {
-        if (this->size() != vec.size())
-            throw Array1D_Error(
-                "void Array1D<X>::operator*=(const Array1D<Y>& vec): incompatible numbers of elements, " + Subs::str(
-                    this->size()) +
-                " versus " + Subs::str(vec.size()));
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] *= vec.buff[i];
-    }
-
-    template<class X>
-    template<class Y>
-    void Array1D<X>::operator/=(const Array1D<Y> &vec) {
-        if (this->size() != vec.size())
-            throw Array1D_Error(
-                "void Array1D<X>::operator/=(const Array1D<Y>& vec): incompatible numbers of elements, " + Subs::str(
-                    this->size()) +
-                " versus " + Subs::str(vec.size()));
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] /= vec.buff[i];
-    }
-
-    template<class X>
-    void Array1D<X>::cos() {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = std::cos(this->buff[i]);
-    }
-
-    template<class X>
-    void Array1D<X>::sin() {
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = std::sin(this->buff[i]);
-    }
-
-    /** Finds position of x assuming values are ordered. If they are not ordered, the routine will not
-     * check, and wrong results will ensue. This one is useful if you have some idea of the likely
-     * index value.
-     * \param x the value to locate
-     * \param jhi input roughly the index expected; returned as the value such that x lies between the jhi-1 and jhi'th
-     * elements
-     */
-    template<class X>
-    void Array1D<X>::hunt(const X &x, int &jhi) const {
-        unsigned long int uljhi = jhi;
-        Subs::hunt(this->buff, this->size(), x, uljhi);
-        jhi = int(uljhi);
-    }
-
-    /** Finds position of x assuming values are ordered. If they are not ordered, the routine will not
-     * check, and wrong results will ensue. This one is useful if you no idea the likely index value.
-     * \param x the value to locate
-     * \param jhi returned as the value such that x lies between the jhi-1 and jhi'th elements
-     */
-    template<class X>
-    unsigned long Array1D<X>::locate(const X &x) const {
-        return Subs::locate(this->buff, this->size(), x);
-    }
-
-    /** Sorts an array into ascending order
-     */
-    template<class X>
-    Buffer1D<unsigned long int> Array1D<X>::sort() {
-        Buffer1D<unsigned long int> key(this->size());
-        heaprank(this->buff, key.ptr(), this->size());
-        Array1D<X> temp(*this);
-        for (int i = 0; i < this->size(); i++)
-            this->buff[i] = temp[key[i]];
-        return key;
-    }
-
-    /** Tests whether values increase or decrease monotonically and so whether hunt can be used.
-     */
-    template<class X>
-    bool Array1D<X>::monotonic() const {
-        if (this->size() < 3) {
-            return true;
-        } else {
-            bool up = this->buff[0] < this->buff[this->size() - 1];
-            for (int i = 1; i < this->size(); i++) {
-                bool up_now = this->buff[i - 1] < this->buff[i];
-                if ((up && !up_now) || (!up && up_now)) return false;
-            }
-            return true;
-        }
-    }
-
-    // Non-member functions
-
-    // Operations with other arrays
-    template<class X, class Y>
-    Array1D<X> operator-(const Array1D<X> &v1, const Array1D<Y> &v2) {
-        if (v1.size() != v2.size())
-            throw Array1D_Error(
-                "void operator-=(const Array1D<X>&, const Array1D<Y>&): incompatible numbers of elements, " + Subs::str(
-                    v1.size())
-                + " versus " + Subs::str(v2.size()));
-        Array1D<X> temp = v1;
-        temp -= v2;
-        return temp;
-    }
-
-    // Operations with other arrays
-    template<class X, class Y>
-    Array1D<X> operator+(const Array1D<X> &v1, const Array1D<Y> &v2) {
-        if (v1.size() != v2.size())
-            throw Array1D_Error(
-                "void operator+=(const Array1D<X>&, const Array1D<Y>&): incompatible numbers of elements, " + Subs::str(
-                    v1.size())
-                + " versus " + Subs::str(v2.size()));
-        Array1D<X> temp = v1;
-        temp += v2;
-        return temp;
-    }
-
-    //! Returns the maximum value
-    template<class X>
-    X max(const Array1D<X> &vec) {
-        return vec.max();
-    }
-
-    //! Returns the minimum value
-    template<class X>
-    X min(const Array1D<X> &vec) {
-        return vec.min();
-    }
-
-    //! Subtracts a constant to create a new Array1D
-    template<class X, class Y>
-    Array1D<X> operator-(const Array1D<X> &vec, const Y &con) {
-        Array1D<X> temp = vec;
-        temp -= con;
-        return temp;
-    }
-
-    //! Pre-multiplies by a constant
-    template<class X, class Y>
-    Array1D<X> operator*(const Y &con, const Array1D<X> &vec) {
-        Array1D<X> temp = vec;
-        temp *= con;
-        return temp;
-    }
-
-    //! Divides by a constant
-    template<class X, class Y>
-    Array1D<X> operator/(const Array1D<X> &vec, const Y &con) {
-        Array1D<X> temp = vec;
-        temp /= con;
-        return temp;
-    }
-
-    //! Mulitplies two Array1Ds, element by element
-    template<class X, class Y>
-    Array1D<X> operator*(const Array1D<X> &vec1, const Array1D<X> &vec2) {
-        Array1D<X> temp = vec1;
-        temp *= vec2;
-        return temp;
-    }
-
-    //! Divides two Array1Ds, element by element
-    template<class X, class Y>
-    Array1D<X> operator/(const Array1D<X> &vec1, const Array1D<X> &vec2) {
-        Array1D<X> temp = vec1;
-        temp /= vec2;
-        return temp;
-    }
-
-    //! Takes cosine of array
-    template<class X>
-    Array1D<X> cos(const Array1D<X> &vec) {
-        Array1D<X> temp = vec;
-        temp.cos();
-        return temp;
-    }
-
-    //! Takes sine of array
-    template<class X>
-    Array1D<X> sin(const Array1D<X> &vec) {
-        Array1D<X> temp = vec;
-        temp.sin();
-        return temp;
-    }
-
-    /** Sets an Array1D to a constant
-     */
-    template<class X>
-    Array1D<X> &Array1D<X>::operator=(const X &con) {
-        Buffer1D<X>::operator=(con);
-        return *this;
+    template<typename F>
+    void transform_inplace(F&& f)
+    {
+        std::ranges::for_each(data_, [&](T& v) { v = f(v); });
     }
 };
 
-#endif //ARRAY1D_H
+/* ------------------------------------------------------------------------- */
+/* free operators (defined in terms of the member operators)                 */
+/* ------------------------------------------------------------------------- */
+
+template<typename T, typename U>
+Array1D<T> operator+(Array1D<T> lhs, const Array1D<U>& rhs) { lhs += rhs; return lhs; }
+template<typename T, typename U>
+Array1D<T> operator-(Array1D<T> lhs, const Array1D<U>& rhs) { lhs -= rhs; return lhs; }
+template<typename T, typename U>
+Array1D<T> operator*(Array1D<T> lhs, const Array1D<U>& rhs) { lhs *= rhs; return lhs; }
+template<typename T, typename U>
+Array1D<T> operator/(Array1D<T> lhs, const Array1D<U>& rhs) { lhs /= rhs; return lhs; }
+
+template<typename T>
+Array1D<T> operator+(Array1D<T> lhs, const T& c) { lhs += c; return lhs; }
+template<typename T>
+Array1D<T> operator-(Array1D<T> lhs, const T& c) { lhs -= c; return lhs; }
+template<typename T>
+Array1D<T> operator*(Array1D<T> lhs, const T& c) { lhs *= c; return lhs; }
+template<typename T>
+Array1D<T> operator/(Array1D<T> lhs, const T& c) { lhs /= c; return lhs; }
+
+template<typename T>
+Array1D<T> operator*(const T& c, Array1D<T> rhs) { rhs *= c; return rhs; }
+
+/* convenience wrappers mirroring <cmath> ---------------------------------- */
+
+template<typename T> Array1D<T> cos(Array1D<T> v) { v.to_cos(); return v; }
+template<typename T> Array1D<T> sin(Array1D<T> v) { v.to_sin(); return v; }
+
+} // namespace subs

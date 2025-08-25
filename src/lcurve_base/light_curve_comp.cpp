@@ -1,7 +1,7 @@
 // AUTHOR: TOM MARSH
 
 #include "lcurve.h"
-#include "buffer2d.h"
+#include "array1d.h"
 #include "constants.h"
 
 #ifdef _OPENMP
@@ -21,7 +21,7 @@
  *              svd if scale=true, otherwise values on entry are used. Only sfac[0] will be used if
  *              model parameter iscale=no.
  * \param calc  the computed light curve
- * \param wdwarf contribution of the white at phase 0.5
+ * \param wdwarf contri<tion of the white at phase 0.5
  * \param chisq  chi**2 value
  * \param wnok   weighted number of data points
  * \param logg2  flux-weighted logg for star 2, CGS units
@@ -32,8 +32,8 @@ using namespace std;
 void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
                               const Lcurve::Data &data, bool scale,
                               bool rdata, bool info,
-                              Subs::Buffer1D<double> &sfac,
-                              Subs::Array1D<double> &calc, double &wdwarf,
+                              vector<double> &sfac,
+                              vector<double> &calc, double &wdwarf,
                               double &chisq, double &wnok,
                               double &logg1, double &logg2, double &rv1, double &rv2) {
     // Get the size right
@@ -63,7 +63,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     }
 
     // Generate arrays over each star's face. Fine grids first:
-    Subs::Buffer1D<Point> star1f, star2f, disc, edge, spot;
+    vector<Point> star1f, star2f, disc, edge, spot;
     set_star_grid(mdl, Roche::PRIMARY, true, star1f);
     if (info) {
         cerr << "Number of points for star 1 (fine) = " << star1f.size() << endl;
@@ -77,7 +77,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     set_star_continuum(mdl, star1f, star2f);
 
     // Now coarse grids
-    Subs::Buffer1D<Point> star1c;
+    vector<Point> star1c;
     if (mdl.nlat1f == mdl.nlat1c) {
         star1c = star1f;
     } else {
@@ -91,7 +91,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     bool copy2 = (mdl.nlat2f == mdl.nlat2c) &&
                  (!mdl.npole || r1 >= r2 || (mdl.nlatfill == 0 && mdl.nlngfill == 0));
 
-    Subs::Buffer1D<Point> star2c;
+    vector<Point> star2c;
     if (copy2) {
         star2c = star2f;
     } else {
@@ -166,14 +166,14 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
         if (mdl.opaque) {
             vector<pair<double, double> > eclipses;
             // Apply eclipse by disc to star 1
-            for (int i = 0; i < star1f.size(); i++) {
+            for (long unsigned int i = 0; i < star1f.size(); i++) {
                 eclipses = Roche::disc_eclipse(mdl.iangle, rdisc1, rdisc2,
                                                mdl.beta_disc, mdl.height_disc,
                                                star1f[i].posn);
                 for (size_t j = 0; j < eclipses.size(); j++)
                     star1f[i].eclipse.push_back(eclipses[j]);
             }
-            for (int i = 0; i < star1c.size(); i++) {
+            for (long unsigned int i = 0; i < star1c.size(); i++) {
                 eclipses = Roche::disc_eclipse(mdl.iangle, rdisc1, rdisc2,
                                                mdl.beta_disc, mdl.height_disc,
                                                star1c[i].posn);
@@ -182,14 +182,14 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             }
 
             // Apply eclipse by disc to star 2
-            for (int i = 0; i < star2f.size(); i++) {
+            for (long unsigned int i = 0; i < star2f.size(); i++) {
                 eclipses = Roche::disc_eclipse(mdl.iangle, rdisc1, rdisc2,
                                                mdl.beta_disc, mdl.height_disc,
                                                star2f[i].posn);
                 for (size_t j = 0; j < eclipses.size(); j++)
                     star2f[i].eclipse.push_back(eclipses[j]);
             }
-            for (int i = 0; i < star2c.size(); i++) {
+            for (long unsigned int i = 0; i < star2c.size(); i++) {
                 eclipses = Roche::disc_eclipse(mdl.iangle, rdisc1, rdisc2,
                                                mdl.beta_disc, mdl.height_disc,
                                                star2c[i].posn);
@@ -220,7 +220,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     double middle = (xmin + xmax) / 2., range = (xmax - xmin) / 2.;
 
     // Compute light curve
-    Subs::Buffer2D<double> fcomp(data.size(), mdl.t2 > 0 ? 5 : 4);
+    vector<vector<double>> fcomp(data.size(), vector<double>(mdl.t2 > 0 ? 5 : 4));
 
     // Next use a dynamically-scheduled openmp section to speed the loop over the
     // data. Dynamic scheduling allows for variability in the time per point.
@@ -288,15 +288,15 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     }
 
     // Compute white dwarf contribution
-    Subs::Buffer1D<Point> fstar2;
+    vector<Point> fstar2;
     wdwarf = comp_star1(mdl.iangle, ldc1, 0.5, 0., 1, mdl.q, mdl.beam_factor1,
                         mdl.velocity_scale, gint, star1f, star1c);
 
     if (scale) {
         if (mdl.iscale) {
-            Subs::Buffer1D<Subs::ddat> svd(data.size());
-            Subs::Buffer1D<double> w;
-            Subs::Buffer2D<double> u, v;
+            vector<Subs::ddat> svd(data.size());
+            vector<double> w;
+            vector<vector<double>> u, v;
             for (size_t np = 0; np < data.size(); np++) {
                 svd[np].x = data[np].time;
                 svd[np].y = data[np].flux;
@@ -313,7 +313,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             Subs::svdfit(svd, sfac, fcomp, u, v, w);
             wdwarf *= sfac[0];
             if (mdl.t2 <= 0.) {
-                Subs::Buffer1D<double> tfac(4);
+                vector<double> tfac(4);
                 tfac = sfac;
                 sfac.resize(5);
                 sfac[0] = tfac[0];

@@ -25,7 +25,7 @@ void Subs::amoeba(std::vector<std::pair<Subs::Array1D<double>, double> > &params
     const double TINY = 1.e-10;
     for (size_t i = 0; i < params.size(); i++)
         if (
-                int(params.size()) != params[i].first.size() + 1)
+                params.size() != params[i].first.size() + 1)
             throw Subs_Error("amoeba: number of parameters is not one less than the number of parameter vectors on input");
 
     int ndim = params[0].first.size();
@@ -122,7 +122,7 @@ namespace Subs {
     //! Helper routine for amoeba
     void amoeba_get_psum(const std::vector<std::pair<Subs::Array1D<double>, double>> &params,
                          Subs::Array1D<double> &psum) {
-        for (int j = 0; j < psum.size(); j++) {
+        for (long unsigned int j = 0; j < psum.size(); j++) {
             double sum = 0.;
             for (size_t i = 0; i < params.size(); i++)
                 sum += params[i].first[j];

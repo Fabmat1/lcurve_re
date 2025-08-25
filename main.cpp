@@ -44,10 +44,10 @@ int main(int argc, char* argv[]) {
         noise = config["noise"].get<double>();
     }
 
-    int seed; bool scale; Subs::Buffer1D<double> sfac;
+    int seed; bool scale; vector<double> sfac;
     Helpers::load_seed_scale_sfac(config, no_file, model, seed, scale, sfac);
 
-    Subs::Array1D<double> fit;
+    vector<double> fit;
     double wdwarf, chisq, wnok, logg1, logg2, rv1, rv2;
     Lcurve::light_curve_comp(model, data, scale, !no_file, true, sfac,
                              fit, wdwarf, chisq, wnok,

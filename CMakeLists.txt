@@ -2,13 +2,12 @@ cmake_minimum_required(VERSION 3.28.3)
 project(lcurve_re)
 
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd")
 
 # Check for CUDA
 find_package(CUDA)
 if(CUDA_FOUND)
     add_definitions(-DHAVE_CUDA)
-    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -O3 -arch=sm_70)
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -O3 -arch=sm_70")
     enable_language(CUDA)
 endif()
 
@@ -49,7 +48,6 @@ set(SOURCES
         src/lcurve_base/light_curve_comp.cpp
         src/lcurve_base/lcurve.h
         src/lcurve_base/constants.h
-        src/lcurve_base/buffer2d.h
         src/lcurve_base/comp_light.cpp
         src/lcurve_base/set_star_grid.cpp
         src/lcurve_base/set_star_continuum.cpp
@@ -92,6 +90,10 @@ set(SOURCES
 )
 
 add_library(utilities STATIC ${SOURCES})
+
+
+find_package(OpenMP REQUIRED)          # looks for the compiler’s OpenMP support
+target_link_libraries(utilities PRIVATE OpenMP::OpenMP_CXX)
 
 # Link CUDA runtime if found
 if(CUDA_FOUND)
@@ -169,8 +171,6 @@ if(LCURVE_ENABLE_ASAN AND NOT CUDA_FOUND
                            -fno-omit-frame-pointer)
 endif()
 
-# ─── RELEASE-ONLY OPTIMISATION FLAGS ──────────────────────────────
-set(_RELEASE_FLAGS "-O3 -march=native -fopenmp -funroll-loops -ftree-vectorize -fopenmp-simd")
 
 # ─── HELPER FUNCTION TO APPLY EVERYTHING TO A TARGET ──────────────
 function(lcurve_setup_target TGT)

@@ -44,7 +44,7 @@
 Subs::xy<double,double> envelope(double iangle, double lambda, double r1);
 
 void Lcurve::set_star_grid(const Model& mdl, Roche::STAR which_star, bool fine,
-                           Subs::Buffer1D<Lcurve::Point>& star){
+                           vector<Lcurve::Point>& star){
 
     double r1, r2;
     mdl.get_r1r2(r1, r2);
@@ -216,7 +216,7 @@ void Lcurve::set_star_grid(const Model& mdl, Roche::STAR which_star, bool fine,
     }
 }
 
-void Lcurve::add_faces(Subs::Buffer1D<Lcurve::Point>& star, int& nface, double tlo, double thi, double dtheta,
+void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, double thi, double dtheta,
                        int nlatfill, int nlngfill, bool npole, Roche::STAR which_star, double q, double iangle,
                        double r1, double r2, double rref1, double rref2, bool roche1, bool roche2,
                        double spin1, double spin2, bool eclipse, double gref, double pref1, double pref2,

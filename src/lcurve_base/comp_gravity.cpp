@@ -15,7 +15,7 @@
  * \return the value of logg
  */
 
-double Lcurve::comp_gravity1(const Model& mdl, const Subs::Buffer1D<Lcurve::Point>& star1){
+double Lcurve::comp_gravity1(const Model& mdl, const vector<Lcurve::Point>& star1){
 
     // Calculate the unit scaling factor to get CGS gravity
     double gm = std::pow(1000.*mdl.velocity_scale,3)*mdl.tperiod*Constants::DAY/Constants::TWOPI;
@@ -51,7 +51,7 @@ double Lcurve::comp_gravity1(const Model& mdl, const Subs::Buffer1D<Lcurve::Poin
     double sumfg=0., sumf=0;
 
     // Star 1.
-    for(int i=0; i<star1.size(); i++){
+    for(long unsigned int i=0; i<star1.size(); i++){
         const Point& pt = star1[i];
         // flux has built-in area factor
         sumfg += pt.flux*pt.gravity;
@@ -74,7 +74,7 @@ double Lcurve::comp_gravity1(const Model& mdl, const Subs::Buffer1D<Lcurve::Poin
  */
 
 double Lcurve::comp_gravity2(const Model& mdl,
-                             const Subs::Buffer1D<Lcurve::Point>& star2){
+                             const vector<Lcurve::Point>& star2){
 
     // Calculate the unit scaling factor to get CGS gravity
     double gm = std::pow(1000.*mdl.velocity_scale,3)*mdl.tperiod*Constants::DAY/Constants::TWOPI;
@@ -109,7 +109,7 @@ double Lcurve::comp_gravity2(const Model& mdl,
     double sumfg=0., sumf=0;
 
     // Star 2.
-    for(int i=0; i<star2.size(); i++){
+    for(long unsigned int i=0; i<star2.size(); i++){
         const Point& pt = star2[i];
         // flux has built-in area factor
         sumfg += pt.flux*pt.gravity;

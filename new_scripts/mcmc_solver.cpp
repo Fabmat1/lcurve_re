@@ -4,6 +4,7 @@
 #include <string>
 #include <cmath>
 #include <vector>
+#include <iomanip>
 #include <deque>
 #include <chrono>
 #include <nlohmann/json.hpp>
@@ -55,7 +56,7 @@ int main(int argc, char* argv[]) {
     // Initialize scale factors
     int seed;
     bool scale;
-    Subs::Buffer1D<double> sfac;
+    vector<double> sfac;
     Helpers::load_seed_scale_sfac(config, no_file, model, seed, scale, sfac);
 
     // Get variable parameters
@@ -108,7 +109,7 @@ int main(int argc, char* argv[]) {
     uniform_real_distribution<> uni(0.0, 1.0);
 
     // Initial chi-squared
-    Subs::Array1D<double> fit;
+    vector<double> fit;
     double wd0, chisq0, wn0, lg10, lg20, rv10, rv20;
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              fit, wd0, chisq0, wn0,
@@ -297,7 +298,6 @@ int main(int argc, char* argv[]) {
         }
         model.set_param(prop);
         
-        double prop_log_prior_q;
         // Calculate log prior for proposed parameters
         double log_prior_prop = 0.0;
         if (use_priors) {
@@ -327,7 +327,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Evaluate
-        Subs::Array1D<double> fitp;
+        vector<double> fitp;
         double wdp, chp, wnp, lg1p, lg2p, rv1p, rv2p;
         try {
             light_curve_comp(model, data, scale, !no_file, false, sfac,
@@ -393,8 +393,28 @@ int main(int argc, char* argv[]) {
 
     // Finish bar
     auto t_end = Clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start);
+
+    // Convert to hours, minutes, seconds
+    auto total_seconds = duration.count() / 1000.0;
+    int hours = static_cast<int>(total_seconds / 3600);
+    int minutes = static_cast<int>((total_seconds - hours * 3600) / 60);
+    double seconds = total_seconds - hours * 3600 - minutes * 60;
+
     // Don't forget to add a newline when sampling is complete
-    cout << "\n" << BRIGHT_GREEN << "✓ MCMC sampling completed!" << RESET << endl;
+    cout << "\n" << BRIGHT_GREEN << "✓ MCMC sampling completed! Took: ";
+
+    // Only print hours if != 0
+    if (hours > 0) {
+        cout << hours << "h ";
+    }
+
+    // Only print minutes if != 0
+    if (minutes > 0) {
+        cout << minutes << "m ";
+    }
+
+    cout << fixed << setprecision(2) << seconds << "s" << RESET << endl;
 
     // Report
     cout << "Best chi^2 = " << best_chisq << endl;
@@ -413,7 +433,7 @@ int main(int argc, char* argv[]) {
     chain_file.close();
 
     // Best-fit light curve & plot etc.
-    Subs::Array1D<double> best_fit;
+    vector<double> best_fit;
     model.set_param(best_pars);
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
@@ -422,7 +442,7 @@ int main(int argc, char* argv[]) {
 
     // Write output file
     string sout = config["output_file_path"].get<string>();
-    for (int i = 0; i < data.size(); ++i) data[i].flux = best_fit[i] + noise * Subs::gauss2(seed);
+    for (long unsigned int i = 0; i < data.size(); ++i) data[i].flux = best_fit[i] + noise * Subs::gauss2(seed);
     Helpers::write_data(data, sout);
 
     return 0;

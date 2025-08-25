@@ -1,5 +1,7 @@
 #include "../new_subs.h"
 #include "lcurve.h"
+#include <vector>
+#include <algorithm>
 
 /** This routine scales a given fit to obtain a minimum chi**2 (equivalent to assuming complete
  *  uncertainty in the distance and/or absolute scale of the system. It returns the optimum scaling
@@ -11,10 +13,10 @@
  * \return the optimum scale factor or 1 if nok = 0.
  */
 
-double Lcurve::re_scale(const Lcurve::Data& data, Subs::Array1D<double>& fit, double& chisq, double& wnok){
+double Lcurve::re_scale(const Lcurve::Data& data, std::vector<double>& fit, double& chisq, double& wnok){
     double wgt, sdy = 0., syy = 0.;
     wnok = 0.;
-    for(int i=0; i<fit.size(); i++){
+    for(size_t i=0; i<fit.size(); i++){
         if(data[i].weight > 0.){
             wgt   = data[i].weight/Subs::sqr(data[i].ferr);
             sdy  += wgt*data[i].flux*fit[i];
@@ -25,13 +27,14 @@ double Lcurve::re_scale(const Lcurve::Data& data, Subs::Array1D<double>& fit, do
     double scale;
     if(wnok > 0.0){
         scale = sdy / syy;
-        fit  *= scale;
-
+        // Use std::transform for vectorized scaling - more efficient
+        std::transform(fit.begin(), fit.end(), fit.begin(), 
+                      [scale](double x) { return x * scale; });
+        
         chisq = 0.;
-        for(int i=0; i<fit.size(); i++)
+        for(size_t i=0; i<fit.size(); i++)
             if(data[i].weight > 0.0)
                 chisq += data[i].weight*Subs::sqr((data[i].flux - fit[i])/data[i].ferr);
-
     }else{
         scale = 1.;
         chisq = 0.;

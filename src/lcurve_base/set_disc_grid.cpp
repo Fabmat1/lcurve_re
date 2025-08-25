@@ -26,7 +26,7 @@
  */
 
 void Lcurve::set_disc_grid(const Model& mdl,
-                           Subs::Buffer1D<Lcurve::Point>& disc){
+                           vector<Lcurve::Point>& disc){
 
     const double EFAC = 1.0000001;
 
@@ -144,7 +144,7 @@ void Lcurve::set_disc_grid(const Model& mdl,
  */
 
 void Lcurve::set_disc_edge(const Model& mdl, bool outer,
-                           Subs::Buffer1D<Lcurve::Point>& edge,
+                           vector<Lcurve::Point>& edge,
                            bool visual){
 
     const double EFAC = 1.0000001;
