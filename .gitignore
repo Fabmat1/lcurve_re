@@ -21,3 +21,5 @@ Testing/Temporary/LastTest.log
 test
 lcurve_re
 simplex
+*.svg
+lcurve_simplex
