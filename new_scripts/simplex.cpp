@@ -26,108 +26,127 @@ static double compute_chisq(Lcurve::Model &model, const Lcurve::Data &data,
 }
 
 // Nelder-Mead Simplex algorithm
-vector<double> nelder_mead(function<double(const vector<double>&)> f,
-                           const vector<double> &x0,
-                           const vector<double> &step,
-                           const vector<pair<double,double>> &limits,
-                           int max_iter = 999999,
-                           double tol = 5e-5) {
-    int n = x0.size();
-    int simplex_size = n + 1;
-    vector<vector<double>> simplex(simplex_size, x0);
-    // initial simplex
-    for (int i = 0; i < n; ++i) {
-        simplex[i+1][i] = x0[i] + step[i];
-        // enforce limits
-        simplex[i+1][i] = min(max(simplex[i+1][i], limits[i].first), limits[i].second);
+//----------------------------------------------------------
+
+std::vector<double> nelder_mead(
+          const std::function<double(const std::vector<double>&)>& f,
+          const std::vector<double>& x0,
+          const std::vector<double>& step,
+          const std::vector<std::pair<double,double>>& limits,
+          int    max_iter = 5'000,
+          double ftol     = 1.e-5)          //  <-- ftol = NR “ftol”
+{
+    const int n = static_cast<int>(x0.size());
+    const int m = n + 1;                    // simplex size
+
+    // -----------------------------------------------------------------
+    // Build initial simplex:  x0  +  step[i] ê_i   (clipped to limits)
+    // -----------------------------------------------------------------
+    std::vector<std::vector<double>> simplex(m, x0);
+    for(int i = 0; i < n; ++i){
+        simplex[i+1][i] = std::clamp(x0[i] + step[i], limits[i].first,
+                                                 limits[i].second);
     }
-    vector<double> fvals(simplex_size);
-    for (int i = 0; i < simplex_size; ++i) fvals[i] = f(simplex[i]);
 
-    for (int iter = 0; iter < max_iter; ++iter) {
-        if (iter % 10 == 0) {
-            cout << "Iteration " << iter << " ";
-            cout << " Weighted Chi^2 = " << accumulate(fvals.begin(), fvals.end(), 0.0)/n << endl;
-        };
-        // sort by fvals
-        vector<int> idx(simplex_size);
-        iota(idx.begin(), idx.end(), 0);
-        sort(idx.begin(), idx.end(), [&](int a, int b) { return fvals[a] < fvals[b]; });
-        // best is idx[0], worst is idx[n]
-        vector<double> x_best = simplex[idx[0]];
-        vector<double> x_worst = simplex[idx[n]];
-        // compute centroid of all but worst
-        vector<double> x_centroid(n, 0.0);
-        for (int i = 0; i < simplex_size; ++i) {
-            if (i == idx[n]) continue;
-            for (int j = 0; j < n; ++j) x_centroid[j] += simplex[i][j];
+    // Evaluate function at the vertices
+    std::vector<double> fval(m);
+    for(int i = 0; i < m; ++i) fval[i] = f(simplex[i]);
+
+    // Nelder-Mead loop
+    const double α = 1.0;   // reflection
+    const double γ = 2.0;   // expansion
+    const double ρ = 0.5;   // contraction
+    const double σ = 0.5;   // shrink
+
+    for(int iter = 0; iter < max_iter; ++iter){
+
+        // Rank vertices
+        std::vector<int> idx(m);
+        std::iota(idx.begin(), idx.end(), 0);
+        std::sort(idx.begin(), idx.end(),
+                  [&](int a, int b){ return fval[a] < fval[b]; });
+
+        // -----------------------------------------------------------------
+        //  Convergence test  (Numerical-Recipes style, relative)
+        // -----------------------------------------------------------------
+        double rtol = 2.0*std::fabs(fval[idx[m-1]] - fval[idx[0]]) /
+                      (std::fabs(fval[idx[m-1]]) + std::fabs(fval[idx[0]]) + 1e-30);
+        if(rtol < ftol) break;
+
+        const std::vector<double>& x_best  = simplex[idx[0]];
+        const std::vector<double>& x_worst = simplex[idx[m-1]];
+
+        // Centroid of all but worst
+        std::vector<double> x_cent(n,0.0);
+        for(int k = 0; k < m-1; ++k){
+            const std::vector<double>& v = simplex[idx[k]];
+            for(int j = 0; j < n; ++j) x_cent[j] += v[j];
         }
-        for (double &val : x_centroid) val /= n;
+        for(double& v : x_cent) v /= n;
 
-        // reflection
-        double alpha = 1.0;
-        vector<double> x_ref(n);
-        for (int j = 0; j < n; ++j)
-            x_ref[j] = x_centroid[j] + alpha*(x_centroid[j] - x_worst[j]);
-        // enforce limits
-        for (int j = 0; j < n; ++j)
-            x_ref[j] = min(max(x_ref[j], limits[j].first), limits[j].second);
+        // -------- reflection ------------------------------------------------
+        std::vector<double> x_ref(n);
+        for(int j = 0; j < n; ++j){
+            x_ref[j] = std::clamp(x_cent[j] + α*(x_cent[j] - x_worst[j]),
+                             limits[j].first, limits[j].second);
+        }
         double f_ref = f(x_ref);
 
-        if (f_ref < fvals[idx[0]]) {
-            // expansion
-            double gamma = 2.0;
-            vector<double> x_exp(n);
-            for (int j = 0; j < n; ++j)
-                x_exp[j] = x_centroid[j] + gamma*(x_ref[j] - x_centroid[j]);
-            for (int j = 0; j < n; ++j)
-                x_exp[j] = min(max(x_exp[j], limits[j].first), limits[j].second);
-            double f_exp = f(x_exp);
-            if (f_exp < f_ref) {
-                simplex[idx[n]] = x_exp;
-                fvals[idx[n]] = f_exp;
-            } else {
-                simplex[idx[n]] = x_ref;
-                fvals[idx[n]] = f_ref;
+        if(f_ref < fval[idx[0]]){
+
+            // -------- expansion ---------------------------------------------
+            std::vector<double> x_exp(n);
+            for(int j = 0; j < n; ++j){
+                x_exp[j] = std::clamp(x_cent[j] + γ*(x_ref[j] - x_cent[j]),
+                                 limits[j].first, limits[j].second);
             }
-        } else if (f_ref < fvals[idx[n-1]]) {
-            simplex[idx[n]] = x_ref;
-            fvals[idx[n]] = f_ref;
-        } else {
-            // contraction
-            double rho = 0.5;
-            vector<double> x_con(n);
-            for (int j = 0; j < n; ++j)
-                x_con[j] = x_centroid[j] + rho*(x_worst[j] - x_centroid[j]);
-            for (int j = 0; j < n; ++j)
-                x_con[j] = min(max(x_con[j], limits[j].first), limits[j].second);
+            double f_exp = f(x_exp);
+
+            simplex[idx[m-1]] = (f_exp < f_ref) ? x_exp : x_ref;
+            fval   [idx[m-1]] = std::min(f_ref, f_exp);
+
+        }else if(f_ref < fval[idx[m-2]]){
+
+            // accept reflected point
+            simplex[idx[m-1]] = x_ref;
+            fval   [idx[m-1]] = f_ref;
+
+        }else{
+
+            // -------- contraction -------------------------------------------
+            std::vector<double> x_con(n);
+            for(int j = 0; j < n; ++j){
+                x_con[j] = std::clamp(x_cent[j] + ρ*(x_worst[j] - x_cent[j]),
+                                 limits[j].first, limits[j].second);
+            }
             double f_con = f(x_con);
-            if (f_con < fvals[idx[n]]) {
-                simplex[idx[n]] = x_con;
-                fvals[idx[n]] = f_con;
-            } else {
-                // shrink
-                double sigma = 0.5;
-                for (int i = 1; i < simplex_size; ++i) {
-                    for (int j = 0; j < n; ++j)
-                        simplex[i][j] = simplex[idx[0]][j] + sigma*(simplex[i][j] - simplex[idx[0]][j]);
-                    for (int j = 0; j < n; ++j)
-                        simplex[i][j] = min(max(simplex[i][j], limits[j].first), limits[j].second);
-                    fvals[i] = f(simplex[i]);
+
+            if(f_con < fval[idx[m-1]]){
+                simplex[idx[m-1]] = x_con;
+                fval   [idx[m-1]] = f_con;
+            }else{
+
+                // -------- shrink (FIXED) -------------------------------------
+                for(int k = 1; k < m; ++k){
+                    int i = idx[k];                // real vertex to move
+                    for(int j = 0; j < n; ++j){
+                        simplex[i][j] = std::clamp(x_best[j] +
+                                              σ*(simplex[i][j] - x_best[j]),
+                                              limits[j].first, limits[j].second);
+                    }
+                    fval[i] = f(simplex[i]);
                 }
             }
         }
-        // check convergence
-        double f_mean = accumulate(fvals.begin(), fvals.end(), 0.0)/simplex_size;
-        double var = 0.0;
-        for (double v : fvals) var += (v - f_mean)*(v - f_mean);
-        var /= simplex_size;
-        if (sqrt(var) < tol) break;
+
+        if(iter % 10 == 0){
+            std::cout << "Iter " << iter
+                      << "  χ²_best = " << fval[idx[0]] << std::endl;
+        }
     }
 
-    // return best point
-    int best_idx = min_element(fvals.begin(), fvals.end()) - fvals.begin();
-    return simplex[best_idx];
+    int best = std::min_element(fval.begin(), fval.end()) - fval.begin();
+    return simplex[best];
 }
 
 int main(int argc, char* argv[]) {
@@ -156,15 +175,13 @@ int main(int argc, char* argv[]) {
 
     // Get variable parameters
     int npar = model.nvary();
+    std::vector<double> x0(npar), steps(npar);        // <-- add this line
     Subs::Array1D<double> init_pars = model.get_param();
-    Subs::Array1D<double> dsteps   = model.get_dstep();
+    Subs::Array1D<double> ranges = model.get_range();
     auto limits = model.get_limit();
-
-    // Prepare initial guess and step vectors
-    vector<double> x0(npar), steps(npar);
-    for (int i = 0; i < npar; ++i) {
-        x0[i] = init_pars[i];
-        steps[i] = dsteps[i];
+    for(int i = 0; i < npar; ++i){
+        x0[i]    = init_pars[i];
+        steps[i] = ranges[i];          //  << was dsteps[i]
     }
 
     // Define objective wrapper
@@ -179,7 +196,7 @@ int main(int argc, char* argv[]) {
     auto t0 = Clock::now();
     vector<double> best = nelder_mead(obj, x0, steps, limits,
                                       config.value("simplex_max_iter", 200),
-                                      config.value("simplex_tol", 1e-6));
+                                      config.value("simplex_tol", 1e-5));
     // Ensure returned vector matches parameter count
     if(best.size() != x0.size()) {
         best.resize(x0.size());
@@ -191,7 +208,12 @@ int main(int argc, char* argv[]) {
     // Report
     cout << "Simplex optimization completed in "
          << chrono::duration<double>(t1 - t0).count() << "s" << endl;
-    cout << "Best chi^2 = " << best_chi << endl;
+
+    int    dof            = static_cast<int>(data.size()) - npar;
+    double red_chi        = best_chi / std::max(1, dof);
+
+    std::cout << "Best χ²        = " << best_chi  << '\n'
+              << "Reduced χ²     = " << red_chi   << '\n';
     for (int i = 0; i < npar; ++i) cout << model.get_name(i)
                                         << " = " << best[i] << endl;
 
