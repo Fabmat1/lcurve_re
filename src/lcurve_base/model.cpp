@@ -6,7 +6,7 @@ using json = nlohmann::json;
 using namespace std;
 
 namespace Lcurve {
-    Lcurve::Model::Model(const json& config) {
+    Model::Model(const json& config) {
         // List of parameter names to expect, both physical and computational used
         // for checking that we actually have read in all the ones expected
         map<string,bool> names;
