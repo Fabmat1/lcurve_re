@@ -137,9 +137,10 @@ namespace Helpers {
                 << "set xrange [" << x1 << ":" << x2 << "]\n"
                 << "set yrange [" << fy1 << ":" << fy2 << "]\n"
                 << "plot "
-                "$Model    with lines      lc rgb 'blue'  title 'Model', "
-                "$ObsErr   with yerrorbars lc rgb 'red'   title 'Data err', "
-                "$ObsPts   with points      lc rgb 'red'   pt 7    title 'Data'\n";
+                "$ObsErr   with yerrorbars lc rgb 'black'   title 'Data err', "
+                "$ObsPts   with points      lc rgb 'black'   pt 7    title 'Data', "
+                "$Model    with lines      lc rgb 'red'  title 'Model'\n";
+
 
         // Bottom panel: Residuals
         gp << "set xlabel 'Time (phased)'\n"
@@ -252,9 +253,11 @@ namespace Helpers {
                 << "set ylabel 'Flux'\n"
                 << "set xrange [" << x1 << ":" << x2 << "]\n"
                 << "set yrange [" << fy1 << ":" << fy2 << "]\n"
-                << "plot $Model with lines lc rgb 'blue' title 'Model', "
-                "$ObsErr with yerrorbars lc rgb 'red' title 'Data err', "
-                "$ObsPts with points lc rgb 'red' pt 7 title 'Data'\n";
+                << "plot "
+                "$ObsErr with yerrorbars lc rgb 'black' title 'Data err', "
+                "$ObsPts with points lc rgb 'black' pt 7 title 'Data', "
+                "$Model with lines lc rgb 'red' title 'Model'\n";
+
 
         // bottom
         gp << "set xlabel 'Time (phased)'\n"
