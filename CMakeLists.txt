@@ -62,7 +62,6 @@ set(SOURCES
         src/lroche_base/sphere_eclipse.cpp
         src/lroche_base/face.cpp
         src/svdfit.cpp
-        src/byte_swap.cpp
         src/lroche_base/ingress_egress.cpp
         src/lroche_base/ref_sphere.cpp
         src/lcurve_base/numface.cpp

@@ -23,8 +23,6 @@ using namespace std;
 
 
 namespace Subs {
-    template<typename T>
-    T byte_swap(T value);
 
     class Subs_Error : public std::runtime_error {
     public:
