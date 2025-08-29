@@ -217,5 +217,7 @@ int main(int argc, char* argv[]) {
 
     Helpers::plot_model(data, best_fit, false, copy, config["plot_device"].get<string>());
 
+    Helpers::write_config_and_model_to_json(model, config, config["output_file_path"].get<string>()+".json");
+
     return 0;
 }

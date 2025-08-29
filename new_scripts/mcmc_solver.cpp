@@ -444,6 +444,7 @@ int main(int argc, char* argv[]) {
     string sout = config["output_file_path"].get<string>();
     for (long unsigned int i = 0; i < data.size(); ++i) data[i].flux = best_fit[i] + noise * Subs::gauss2(seed);
     Helpers::write_data(data, sout);
+    Helpers::write_config_and_model_to_json(model, config, config["output_file_path"].get<string>()+".json");
 
     return 0;
 }

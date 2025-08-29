@@ -7,14 +7,30 @@
 
 #include "lcurve_base/lcurve.h"
 #include "gnuplot-iostream.h"
+#include "model.h"       // <-- gives access to struct Pparam
 
 #include "lcurve_base/constants.h"
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 using namespace std;
 
+namespace {
+
+/* Convert a Pparam to the same single-line representation that the
+   parser (Pparam::Pparam(const string&)) understands.            */
+std::string pparam_to_string(const Lcurve::Pparam &p) {
+    std::ostringstream oss;
+    oss << std::setprecision(10) << std::fixed << p.value << " "
+        << std::setprecision(6)  << std::fixed << p.range << " "
+        << std::setprecision(6)  << std::fixed << p.dstep << " "
+        << int(p.vary) << " " << int(p.defined);
+    return oss.str();
+}
+
+}   // unnamed namespace
+
 namespace Helpers {
-    void plot_model(Lcurve::Data data,
+    inline void plot_model(Lcurve::Data data,
                     vector<double> fit,
                     bool no_file,
                     Lcurve::Data copy,
@@ -139,7 +155,7 @@ namespace Helpers {
     }
 
 
-    void plot_model_live(Lcurve::Data data,
+    inline void plot_model_live(Lcurve::Data data,
                          vector<double> fit,
                          bool no_file,
                          Lcurve::Data copy,
@@ -254,7 +270,7 @@ namespace Helpers {
     }
 
 
-    pair<Lcurve::Model, json> load_model_and_config_from_json(string config_file) {
+    inline pair<Lcurve::Model, json> load_model_and_config_from_json(string config_file) {
         ifstream config_stream(config_file);
         if (!config_stream) {
             throw runtime_error("Error: Unable to open configuration file: " + config_file);
@@ -269,7 +285,7 @@ namespace Helpers {
         return make_pair(model, config);
     }
 
-    pair<Lcurve::Data, Lcurve::Data> read_and_copy_lightcurve_from_file(string fpath) {
+    inline pair<Lcurve::Data, Lcurve::Data> read_and_copy_lightcurve_from_file(string fpath) {
         bool no_file = (Subs::toupper(fpath) == "NONE");
         Lcurve::Data data, copy;
         if (!no_file) {
@@ -283,7 +299,7 @@ namespace Helpers {
         return make_pair(data, copy);
     }
 
-    Lcurve::Data generate_fake_data(json config) {
+    inline Lcurve::Data generate_fake_data(json config) {
         double time1 = 0, time2 = 0, expose = 0, noise = 0;
         int ntime = 0, ndivide = 0;
 
@@ -303,13 +319,13 @@ namespace Helpers {
         return fake_data;
     }
 
-    void write_data(Lcurve::Data data_out, string out_path) {
+    inline void write_data(Lcurve::Data data_out, string out_path) {
         // note: noise will already have been added
         data_out.wrasc(out_path);
         cout << "Written data to " << out_path << endl;
     }
 
-    void load_seed_scale_sfac(const json &config, bool no_file, const Lcurve::Model &model,
+    inline void load_seed_scale_sfac(const json &config, bool no_file, const Lcurve::Model &model,
                               int32_t &seed, bool &scale, vector<double> &sfac) {
         // Load seed and ensure it is negative
         seed = config["seed"].get<int32_t>();
@@ -332,12 +348,12 @@ namespace Helpers {
         }
     }
 
-    double velocity_scale_from_inclination(double inclination, double rv_obs, double mass_ratio) {
+    inline double velocity_scale_from_inclination(double inclination, double rv_obs, double mass_ratio) {
         return rv_obs / sin(inclination * M_PI / 180.0) * (mass_ratio + 1) / mass_ratio;
     }
 
     // Compute orbital separation in solar radii
-    double compute_scaled_r1(double r1, double velocity_scale, double P_days) {
+    inline double compute_scaled_r1(double r1, double velocity_scale, double P_days) {
         // Convert to SI units
         double P = P_days * Constants::IDAY;
 
@@ -345,7 +361,7 @@ namespace Helpers {
         return r1/(1000*velocity_scale*P / (Constants::RSUN*2*M_PI));
     }
 
-    std::tuple<double, double, double> parseThreeDoubles(const std::string& input) {
+    inline std::tuple<double, double, double> parseThreeDoubles(const std::string& input) {
         std::istringstream iss(input);
         double a, b, c;
         if (!(iss >> a >> b >> c)) {
@@ -357,6 +373,78 @@ namespace Helpers {
             throw std::runtime_error("Input string contains more than three values.");
         }
         return std::make_tuple(a, b, c);
+    }
+
+
+    /*  Write a copy of the configuration, but with the
+        model_parameters updated to the values held in ‘model’.     */
+    inline void write_config_and_model_to_json(const Lcurve::Model &model,
+                                             json                 config,
+                                             const std::string   &out_path)
+    {
+        if (!config.contains("model_parameters")
+            || !config["model_parameters"].is_object())
+            throw std::runtime_error(
+                 "write_config_and_model_to_json: config misses "
+                 "'model_parameters' object");
+
+        auto &mp = config["model_parameters"];
+
+    #define UPDATE(name)  mp[#name] = pparam_to_string(model.name)
+
+        /* -------- fundamental & geometric -------- */
+        UPDATE(q);              UPDATE(iangle);
+        UPDATE(r1);             UPDATE(r2);
+        UPDATE(cphi3);          UPDATE(cphi4);
+        UPDATE(spin1);          UPDATE(spin2);
+        UPDATE(t1);             UPDATE(t2);
+
+        /* -------- limb darkening -------- */
+        UPDATE(ldc1_1); UPDATE(ldc1_2); UPDATE(ldc1_3); UPDATE(ldc1_4);
+        UPDATE(ldc2_1); UPDATE(ldc2_2); UPDATE(ldc2_3); UPDATE(ldc2_4);
+
+        /* -------- beaming / velocity scale -------- */
+        UPDATE(velocity_scale); UPDATE(beam_factor1); UPDATE(beam_factor2);
+
+        /* -------- ephemeris & timing -------- */
+        UPDATE(t0);  UPDATE(period);  UPDATE(pdot);  UPDATE(deltat);
+
+        /* -------- miscellaneous coefficients -------- */
+        UPDATE(gravity_dark1);  UPDATE(gravity_dark2);
+        UPDATE(absorb);         UPDATE(slope);
+        UPDATE(quad);           UPDATE(cube);        UPDATE(third);
+
+        /* -------- accretion disc -------- */
+        UPDATE(rdisc1);         UPDATE(rdisc2);
+        UPDATE(height_disc);    UPDATE(beta_disc);
+        UPDATE(temp_disc);      UPDATE(texp_disc);
+        UPDATE(lin_limb_disc);  UPDATE(quad_limb_disc);
+        UPDATE(temp_edge);      UPDATE(absorb_edge);
+
+        /* -------- bright spot on disc -------- */
+        UPDATE(radius_spot); UPDATE(length_spot); UPDATE(height_spot);
+        UPDATE(expon_spot);  UPDATE(epow_spot);
+        UPDATE(angle_spot);  UPDATE(yaw_spot);    UPDATE(temp_spot);
+        UPDATE(tilt_spot);   UPDATE(cfrac_spot);
+
+        /* -------- star-spots (up to 3 per star) -------- */
+        UPDATE(stsp11_long); UPDATE(stsp11_lat); UPDATE(stsp11_fwhm); UPDATE(stsp11_tcen);
+        UPDATE(stsp12_long); UPDATE(stsp12_lat); UPDATE(stsp12_fwhm); UPDATE(stsp12_tcen);
+        UPDATE(stsp13_long); UPDATE(stsp13_lat); UPDATE(stsp13_fwhm); UPDATE(stsp13_tcen);
+        UPDATE(stsp21_long); UPDATE(stsp21_lat); UPDATE(stsp21_fwhm); UPDATE(stsp21_tcen);
+        UPDATE(stsp22_long); UPDATE(stsp22_lat); UPDATE(stsp22_fwhm); UPDATE(stsp22_tcen);
+
+        /* -------- uniform equatorial spot -------- */
+        UPDATE(uesp_long1); UPDATE(uesp_long2);
+        UPDATE(uesp_lathw); UPDATE(uesp_taper); UPDATE(uesp_temp);
+
+    #undef UPDATE
+
+        /* pretty-print (2-space indent) */
+        std::ofstream fout(out_path);
+        if (!fout)
+            throw std::runtime_error("Cannot open '" + out_path + "' for writing");
+        fout << std::setw(2) << config << '\n';
     }
 }
 
