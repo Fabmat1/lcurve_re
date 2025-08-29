@@ -22,4 +22,6 @@ test
 lcurve_re
 simplex
 *.svg
-lcurve_simplex
+./lcurve_simplex
+install_manifest.txt
+plots/*
