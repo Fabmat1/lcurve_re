@@ -1,553 +1,397 @@
-#include <cstdlib>
-#include <iostream>
+#include <cmath>
+#include <vector>
 #include "../new_subs.h"
 #include "constants.h"
 #include "../lroche_base/roche.h"
 #include "lcurve.h"
 
-/**
- * comp_light computes a light curve point for a particular phase. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param ldc1 limb darkening for star 1
- * \param ldc2 limb darkening for star 2
- * \param lin_limb_disc1  linear limb darkening for disc
- * \param quad_limb_disc1  quadratic limb darkening for disc
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param beam_factor1 the 3-alpha factor for Doppler beaming for star1
- * \param beam_factor2 the 3-alpha factor for Doppler beaming for star2
- * \param spin1    spin/orbital ratio star 1 (makes a difference to the beaming)
- * \param spin2    spin/orbital ratio star 2 (makes a difference to the beaming)
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param glens1   account for gravitational lensing by star 1
- * \param rlens1   4x the gravitational radius (GM/c^2) of star 1, scaled by separation
- * \param gint     set of numbers for switching between coarse & fine grids
- * \param star1f   geometry/brightness array for star1, fine grid
- * \param star2f   geometry/brightness array for star2, fine grid
- * \param star1c   geometry/brightness array for star1, coarse grid
- * \param star2c   geometry/brightness array for star2, coarse grid
- * \param disc     geometry/brightness array for the disc
- * \param edge     geometry/brightness array for the disc edge
- * \param spot     geometry/brightness array for the bright spot
- * \return the light curve value desired.
- */
+#ifdef _OPENMP
+#   include <omp.h>
+#endif
+
+using std::vector;
+
+/* =============================================================
+   Elementary helpers – no global state is modified anywhere
+   ============================================================= */
+
+namespace {
+
+/* ---------- star-1 element ----------------------------------- */
+template<class LDC_T>
+inline double star1_elem(const Lcurve::Point& pt,
+                         const Subs::Vec3&    earth,
+                         double               phi,
+                         const LDC_T&         ldc,
+                         double               beam,
+                         double               spin,
+                         double               VFAC,
+                         double               XCOFM)
+{
+    if (!pt.visible(phi)) return 0.0;
+
+    double mu = Subs::dot(earth, pt.dirn);
+    if (!ldc.see(mu))     return 0.0;
+
+    if (beam == 0.0)                       /* no Doppler beaming         */
+        return mu * pt.flux * ldc.imu(mu);
+
+    /* Doppler beaming terms */
+    double vx  = -VFAC * spin * pt.posn.y();
+    double vy  =  VFAC * (spin*pt.posn.x() - XCOFM);
+    double vr  = -(earth.x()*vx + earth.y()*vy);
+    double vn  =  pt.dirn.x()*vx + pt.dirn.y()*vy;
+    double mud =  mu - mu*vr - vn;
+
+    return mu * pt.flux * (1.0 - beam*vr) * ldc.imu(mud);
+}
+
+/* ---------- star-2 element ----------------------------------- */
+template<class LDC_T>
+inline double star2_elem(const Lcurve::Point& pt,
+                         const Subs::Vec3&    earth,
+                         double               phi,
+                         const LDC_T&         ldc,
+                         double               beam,
+                         double               spin,
+                         double               VFAC,
+                         double               XCOFM,
+                         bool                 glens1,
+                         double               rlens1)
+{
+    if (!pt.visible(phi)) return 0.0;
+
+    double mu = Subs::dot(earth, pt.dirn);
+    if (!ldc.see(mu))     return 0.0;
+
+    /* gravitational lensing by star 1 (optional) */
+    double magn = 1.0;
+    if (glens1) {
+        Subs::Vec3 s = pt.posn;
+        double     d = -Subs::dot(s, earth);
+        if (d > 0.0) {
+            double p   = (s + d*earth).length();
+            double ph  = 0.5*p;
+            double rd  = rlens1*d;
+            double pd  = (ph*ph > 25.0*rd) ? p + rd/p
+                                           : ph + std::sqrt(ph*ph + rd);
+            magn = pd*pd/(pd-ph)/ph/4.0;
+        }
+    }
+
+    if (beam == 0.0)
+        return mu * magn * pt.flux * ldc.imu(mu);
+
+    double vx  = -VFAC * spin * pt.posn.y();
+    double vy  =  VFAC * ( spin*(pt.posn.x()-1.0) + 1.0 - XCOFM );
+    double vr  = -(earth.x()*vx + earth.y()*vy);
+    double vn  =  pt.dirn.x()*vx + pt.dirn.y()*vy;
+    double mud =  mu - mu*vr - vn;
+
+    return mu * magn * pt.flux * (1.0 - beam*vr) * ldc.imu(mud);
+}
+
+/* ---------- disc / edge element ------------------------------ */
+inline double disc_elem(const Lcurve::Point& pt,
+                        const Subs::Vec3&    earth,
+                        double               phi,
+                        double               lin_ld,
+                        double               quad_ld)
+{
+    if (!pt.visible(phi)) return 0.0;
+
+    double mu = Subs::dot(earth, pt.dirn);
+    if (mu <= 0.0) return 0.0;
+
+    double om = 1.0 - mu;
+    return mu * pt.flux * (1.0 - om*(lin_ld + quad_ld*om));
+}
+
+/* ---------- spot element ------------------------------------- */
+inline double spot_elem(const Lcurve::Point& pt,
+                        const Subs::Vec3&    earth,
+                        double               phi)
+{
+    if (!pt.visible(phi)) return 0.0;
+
+    double mu = Subs::dot(earth, pt.dirn);
+    return (mu > 0.0) ? mu*pt.flux : 0.0;
+}
+
+/* Convenience: return deg->rad once */
+inline void earth_vec(double iangle, double phi,
+                      double &cosi,  double &sini,
+                      Subs::Vec3 &earth)
+{
+    double ri = Subs::deg2rad(iangle);
+    cosi = cos(ri);     sini = sin(ri);
+    earth = Roche::set_earth(cosi, sini, phi);
+}
+
+}       // unnamed namespace
+
+
+
+/* =============================================================
+                comp_light  (all components)
+   ============================================================= */
 
 double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
-                          double lin_limb_disc, double quad_limb_disc,
-                          double phase, double expose, int ndiv, double q,
-                          double beam_factor1, double beam_factor2,
-                          double spin1, double spin2, float vscale,
-                          bool glens1, double rlens1,
-                          const Lcurve::Ginterp& gint,
-                          const vector<Lcurve::Point>& star1f,
-                          const vector<Lcurve::Point>& star2f,
-                          const vector<Lcurve::Point>& star1c,
-                          const vector<Lcurve::Point>& star2c,
-                          const vector<Lcurve::Point>& disc,
-                          const vector<Lcurve::Point>& edge,
-                          const vector<Lcurve::Point>& spot){
-
-    const double XCOFM = q/(1.+q);
-    const double cosi  = cos(Constants::TWOPI*iangle/360.);
-    const double sini  = sin(Constants::TWOPI*iangle/360.);
+                          double lin_ld_disc, double quad_ld_disc,
+                          double phase, double expose, int ndiv,
+                          double q,
+                          double beam1, double beam2,
+                          double spin1, double spin2,
+                          float  vscale,
+                          bool   glens1, double rlens1,
+                          const  Ginterp& gint,
+                          const  vector<Point>& star1f,
+                          const  vector<Point>& star2f,
+                          const  vector<Point>& star1c,
+                          const  vector<Point>& star2c,
+                          const  vector<Point>& disc,
+                          const  vector<Point>& edge,
+                          const  vector<Point>& spot)
+{
+    const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    Subs::Vec3 earth, s;
-    int ptype, nelem1, nelem2, nd;
-    double sum=0., ssum, ssum2, mu, wgt, vr, phi, p, ph, mag, pd, d, phsq, rd;
-    double vx, vy, vn, mud, ommu;
+    double sum = 0.0;
 
-    for(nd=0; nd<ndiv; nd++){
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+:sum) schedule(static) \
+                     if(!omp_in_parallel())
+#endif
+    for (int nd = 0; nd < ndiv; ++nd) {
 
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
+        /* ---- sub-exposure phase & trapezoidal weight -------- */
+        double phi, wgt;
+        if (ndiv == 1) { phi = phase; wgt = 1.0; }
+        else {
+            phi = phase + expose*(nd - (ndiv-1)/2.0)/(ndiv-1);
+            wgt = (nd==0 || nd==ndiv-1) ? 0.5 : 1.0;
         }
 
-        earth = Roche::set_earth(cosi, sini, phi);
+        /* ---- direction to the observer ---------------------- */
+        double cosi, sini;
+        Subs::Vec3 earth;
+        earth_vec(iangle, phi, cosi, sini, earth);
 
-        ptype = gint.type(phi);
-        const vector<Lcurve::Point>& star1 = ptype == 1 ? star1f :
-                                                     star1c;
-        const vector<Lcurve::Point>& star2 = ptype == 3 ? star2f :
-                                                     star2c;
-        nelem1 = star1.size();
-        nelem2 = star2.size();
+        /* ---- choose fine / coarse grids --------------------- */
+        const vector<Point>& star1 = (gint.type(phi)==1) ? star1f : star1c;
+        const vector<Point>& star2 = (gint.type(phi)==3) ? star2f : star2c;
 
-        ssum = 0.;
+        /* ---- accumulate fluxes ------------------------------ */
+        double s1=0., s2=0., sd=0., se=0., ss=0.;
 
-        // Star 1.
-        for(int i=0; i<nelem1; i++){
-            const Point& pt = star1[i];
-            if(pt.visible(phi)){
-                mu = Subs::dot(earth, pt.dirn);
-                if(ldc1.see(mu)){
-                    if(beam_factor1 != 0.){
-                        vx  = -VFAC*spin1*pt.posn.y();
-                        vy  =  VFAC*(spin1*pt.posn.x()-XCOFM);
-                        vr  = -(earth.x()*vx + earth.y()*vy);
-                        vn  = pt.dirn.x()*vx + pt.dirn.y()*vy;
-                        mud = mu - mu*vr - vn;
-                        ssum += mu*pt.flux*(1.-beam_factor1*vr)*ldc1.imu(mud);
-                    }else{
-                        ssum += mu*pt.flux*ldc1.imu(mu);
-                    }
-                }
-            }
-        }
-        ssum *= gint.scale1(phi);
+        for (const auto& pt : star1)
+            s1 += star1_elem(pt, earth, phi, ldc1,
+                             beam1, spin1, VFAC, XCOFM);
 
-        // Star 2.
-        ssum2 = 0.;
+        for (const auto& pt : star2)
+            s2 += star2_elem(pt, earth, phi, ldc2,
+                             beam2, spin2, VFAC, XCOFM,
+                             glens1, rlens1);
 
-        for(int i=0; i<nelem2; i++){
-            const Point& pt = star2[i];
-            if(pt.visible(phi)){
-                mu = Subs::dot(earth, pt.dirn);
+        for (const auto& pt : disc)
+            sd += disc_elem(pt, earth, phi, lin_ld_disc, quad_ld_disc);
 
-                if(ldc2.see(mu)){
+        for (const auto& pt : edge)
+            se += disc_elem(pt, earth, phi, lin_ld_disc, quad_ld_disc);
 
-                    // Account for magnifying effect of gravitational lensing here
-                    mag = 1.;
-                    if(glens1){
-                        // s = vector from centre of mass of star 1 to point of interest
-                        s = pt.posn;
+        for (const auto& pt : spot)
+            ss += spot_elem(pt, earth, phi);
 
-                        // d = distance along line of sight from star
-                        // 1 to point in question
-                        d = -Subs::dot(s, earth);
-                        if(d > 0.){
-                            // p = distance in plane of sky from cofm
-                            // of star 1 to point in question pd =
-                            // larger distance accounting for
-                            // deflection by lensing. For p >>
-                            // rlens1*d, q --> p, mag --> 1. Try to
-                            // save time by avoiding square root if
-                            // possible.
-                            ph   = (p = (s+d*earth).length())/2.;
-                            phsq = ph*ph;
-                            rd   = rlens1*d;
-                            if(phsq > 25.*rd){
-                                pd = p + rd/p;
-                            }else{
-                                pd = ph + std::sqrt(phsq + rd);
-                            }
-                            mag = pd*pd/(pd-ph)/ph/4.;
-                        }
-                    }
-
-                    if(beam_factor2 != 0.){
-                        vx  = -VFAC*spin2*pt.posn.y();
-                        vy  =  VFAC*(spin2*(pt.posn.x()-1.)+1.-XCOFM);
-                        vr  = -(earth.x()*vx + earth.y()*vy);
-                        vn  = pt.dirn.x()*vx + pt.dirn.y()*vy;
-                        mud = mu - mu*vr - vn;
-                        ssum2 += mu*mag*pt.flux*(1-beam_factor2*vr)*ldc2.imu(mud);
-                    }else{
-                        ssum2 += mu*mag*pt.flux*ldc2.imu(mu);
-                    }
-                }
-            }
-        }
-
-        ssum += gint.scale2(phi)*ssum2;
-
-        // Disc
-        for(long unsigned int i=0; i<disc.size(); i++){
-            mu = Subs::dot(earth, disc[i].dirn);
-            if(mu > 0. && disc[i].visible(phi)){
-                ommu  = 1.-mu;
-                ssum += mu*disc[i].flux*(1.-ommu*(lin_limb_disc+quad_limb_disc*ommu));
-            }
-        }
-
-        // Disc edge
-        for(long unsigned int i=0; i<edge.size(); i++){
-            mu = Subs::dot(earth, edge[i].dirn);
-            if(mu > 0. && edge[i].visible(phi)){
-                ommu = 1.-mu;
-                ssum += mu*edge[i].flux*(1.-ommu*(lin_limb_disc+quad_limb_disc*ommu));
-            }
-        }
-
-        // Spot
-        for(long unsigned int i=0; i<spot.size(); i++){
-            mu = Subs::dot(earth, spot[i].dirn);
-            if(mu > 0. && spot[i].visible(phi))
-                ssum += mu*spot[i].flux;
-        }
-
-        sum = sum + wgt*ssum;
+        sum += wgt * ( gint.scale1(phi)*s1 +
+                       gint.scale2(phi)*s2 + sd + se + ss );
     }
 
-    return sum/std::max(1, ndiv-1);
-
+    return sum / std::max(1, ndiv-1);
 }
 
 
-/**
- * comp_star1 computes the flux from star 1 for a particular phase. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param ldc1 limb darkening for star 1
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param beam_factor 3-alpha factor for Doppler beaming
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param gint     contains grid scaling factors
- * \param star1f   fine grid for star1
- * \param star1c   coarse grid for star1
- * \return the light curve value desired.
- */
 
-double Lcurve::comp_star1(double iangle, const LDC& ldc1, double phase, double expose, int ndiv,
-                          double q, double beam_factor1, float vscale,
-                          const Lcurve::Ginterp& gint,
-                          const vector<Lcurve::Point>& star1f,
-                          const vector<Lcurve::Point>& star1c){
+/* =============================================================
+                  comp_star1  (white dwarf)
+   ============================================================= */
 
-    const double XCOFM = q/(1.+q);
-    double ri = Subs::deg2rad(iangle);
-    const double cosi  = cos(ri);
-    const double sini  = sin(ri);
+double Lcurve::comp_star1(double iangle, const LDC& ldc1,
+                          double phase, double expose, int ndiv,
+                          double q, double beam1, float vscale,
+                          const Ginterp& gint,
+                          const vector<Point>& star1f,
+                          const vector<Point>& star1c)
+{
+    const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    Subs::Vec3 earth;
-    double phi, sum=0., ssum, mu, wgt, vr;
-    double vx, vy, vn, mud;
+    double sum = 0.0;
 
-    for(int nd=0; nd<ndiv; nd++){
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+:sum) schedule(static) \
+                     if(!omp_in_parallel())
+#endif
+    for (int nd = 0; nd < ndiv; ++nd) {
 
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
+        double phi, wgt;
+        if (ndiv==1){ phi=phase; wgt=1.0; }
+        else {
+            phi = phase + expose*(nd - (ndiv-1)/2.0)/(ndiv-1);
+            wgt = (nd==0||nd==ndiv-1)?0.5:1.0;
         }
 
-        earth = Roche::set_earth(cosi, sini, phi);
+        double cosi, sini;
+        Subs::Vec3 earth;
+        earth_vec(iangle, phi, cosi, sini, earth);
 
-        // Define the grid to use
-        const vector<Lcurve::Point>& star1 = gint.type(phi) == 1 ? star1f : star1c;
-        int nelem1 = star1.size();
+        const vector<Point>& star1 = (gint.type(phi)==1) ? star1f : star1c;
 
-        ssum = 0.;
-        // Star 1.
+        double s1 = 0.0;
+        for (const auto& pt : star1)
+            s1 += star1_elem(pt, earth, phi, ldc1,
+                             beam1, 1.0, VFAC, XCOFM);
 
-        for(int i=0; i<nelem1; i++){
-            const Point& pt = star1[i];
-            if(pt.visible(phi)){
-                mu = Subs::dot(earth, pt.dirn);
-                if(ldc1.see(mu)){
-                    if(beam_factor1 != 0.){
-                        vx  = -VFAC*pt.posn.y();
-                        vy  =  VFAC*(pt.posn.x()-XCOFM);
-                        vr  = -(earth.x()*vx + earth.y()*vy);
-                        vn  = pt.dirn.x()*vx + pt.dirn.y()*vy;
-                        mud = mu - mu*vr - vn;
-                        ssum += mu*pt.flux*(1.-beam_factor1*vr)*ldc1.imu(mud);
-                    }else{
-                        vr  = VFAC*(earth.x()*pt.posn.y() - earth.y()*(pt.posn.x()-XCOFM));
-                        ssum += mu*pt.flux*(1.-beam_factor1*vr)*ldc1.imu(mu);
-                    }
-                }
-            }
-        }
-
-        sum += wgt*gint.scale1(phase)*ssum;
+        sum += wgt * gint.scale1(phi) * s1;
     }
 
-    return sum/std::max(1, ndiv-1);
-
+    return sum / std::max(1, ndiv-1);
 }
 
 
-/**
- * comp_star2 computes the flux from star 2 only. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param ldc2   limb darkening for star 2
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param beam_factor2 3-alpha Doppler beaming factor for star 2
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param glens1   account for gravitational lensing by star 1
- * \param rlens1   4x the gravitational radius (GM/c^2) of star 1, scaled by separation
- * \param gint     factors for switching grids
- * \param star2f   fine grid for star2
- * \param star2c   coarse grid for star2
- * \return the light curve value desired.
- */
 
-double Lcurve::comp_star2(double iangle, const LDC& ldc2, double phase, double expose, int ndiv,
-                          double q, double beam_factor2, float vscale, bool glens1,
-                          double rlens1, const Lcurve::Ginterp& gint,
-                          const vector<Lcurve::Point>& star2f,
-                          const vector<Lcurve::Point>& star2c){
+/* =============================================================
+                     comp_star2  (secondary)
+   ============================================================= */
 
-    const double XCOFM = q/(1.+q);
-    double ri = Subs::deg2rad(iangle);
-    const double cosi  = cos(ri);
-    const double sini  = sin(ri);
+double Lcurve::comp_star2(double iangle, const LDC& ldc2,
+                          double phase, double expose, int ndiv,
+                          double q, double beam2, float vscale,
+                          bool   glens1, double rlens1,
+                          const  Ginterp& gint,
+                          const  vector<Point>& star2f,
+                          const  vector<Point>& star2c)
+{
+    const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    Subs::Vec3 earth, s;
-    double phi, sum=0., ssum, mu, wgt, vr;
-    double p, ph, mag, pd, d, phsq, rd, vx, vy, vn, mud;
+    double sum = 0.0;
 
-    for(int nd=0; nd<ndiv; nd++){
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+:sum) schedule(static) \
+                     if(!omp_in_parallel())
+#endif
+    for (int nd = 0; nd < ndiv; ++nd) {
 
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
+        double phi, wgt;
+        if (ndiv==1){ phi=phase; wgt=1.0; }
+        else {
+            phi = phase + expose*(nd - (ndiv-1)/2.0)/(ndiv-1);
+            wgt = (nd==0||nd==ndiv-1)?0.5:1.0;
         }
 
-        earth = Roche::set_earth(cosi, sini, phi);
+        double cosi, sini;
+        Subs::Vec3 earth;
+        earth_vec(iangle, phi, cosi, sini, earth);
 
-        // Define the grid to use
-        const vector<Lcurve::Point>& star2 = gint.type(phi) == 3 ? star2f : star2c;
-        int nelem2 = star2.size();
+        const vector<Point>& star2 = (gint.type(phi)==3) ? star2f : star2c;
 
-        ssum = 0.;
+        double s2 = 0.0;
+        for (const auto& pt : star2)
+            s2 += star2_elem(pt, earth, phi, ldc2,
+                             beam2, 1.0, VFAC, XCOFM,
+                             glens1, rlens1);
 
-        // Star 2.
-        for(int i=0; i<nelem2; i++){
-            const Point& pt = star2[i];
-            if(pt.visible(phi)){
-                mu = Subs::dot(earth, pt.dirn);
-                if(ldc2.see(mu)){
-
-                    // Account for magnifying effect of gravitational lensing here
-                    mag = 1.;
-                    if(glens1){
-                        // s = vector from centre of mass of star 1 to point of interest
-                        s = pt.posn;
-
-                        // d = distance along line of sight from star 1 to point in question
-                        d = -Subs::dot(s, earth);
-                        if(d > 0.){
-                            // p = distance in plane of sky from cofm
-                            // of star 1 to point in question pd =
-                            // larger distance accounting for lensing
-                            // deflection. For p >> rlens1*d, pd -->
-                            // p, mag --> 1. Try to save time by
-                            // avoiding square root if possible.
-                            ph   = (p = (s+d*earth).length())/2.;
-                            phsq = ph*ph;
-                            rd   = rlens1*d;
-                            if(phsq > 25.*rd){
-                                pd = p + rd/p;
-                            }else{
-                                pd = ph + std::sqrt(phsq + rd);
-                            }
-                            mag = pd*pd/(pd-ph)/ph/4.;
-                        }
-                    }
-
-                    if(beam_factor2 != 0.){
-                        vx  = -VFAC*pt.posn.y();
-                        vy  =  VFAC*(pt.posn.x()-XCOFM);
-                        vr  = -(earth.x()*vx + earth.y()*vy);
-                        vn  = pt.dirn.x()*vx + pt.dirn.y()*vy;
-                        mud = mu - mu*vr - vn;
-                        ssum += mu*mag*pt.flux*(1-beam_factor2*vr)*ldc2.imu(mud);
-                    }else{
-                        vr  = VFAC*(earth.x()*pt.posn.y() - earth.y()*(pt.posn.x()-XCOFM));
-                        ssum += mu*mag*pt.flux*(1-beam_factor2*vr)*ldc2.imu(mu);
-                    }
-                }
-            }
-        }
-
-        sum += wgt*gint.scale2(phi)*ssum;
+        sum += wgt * gint.scale2(phi) * s2;
     }
 
-    return sum/std::max(1, ndiv-1);
-
+    return sum / std::max(1, ndiv-1);
 }
 
-/**
- * comp_disc computes the flux from the disc at a particular phase. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param lin_limb_disc linear limb darkening coefficient for the disc
- * \param quad_limb_disc quadratic limb darkening for the disc
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param disc     geometry/brightness array for the disc
- * \return the light curve value desired.
- */
 
-double Lcurve::comp_disc(double iangle, double lin_limb_disc, double quad_limb_disc,
-                         double phase, double expose, int ndiv, double q,
-                         const vector<Lcurve::Point>& disc){
 
-    const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
-    double ri = Subs::deg2rad(iangle);
-    const double cosi  = cos(ri);
-    const double sini  = sin(ri);
+/* =============================================================
+        comp_disc  /  comp_edge  (just geometry differs)
+   ============================================================= */
 
-    Subs::Vec3 earth;
-    double phi, sum=0., ssum, mu, wgt;
-    for(int nd=0; nd<ndiv; nd++){
+static double disc_like(double iangle,
+                        double lin_ld, double quad_ld,
+                        double phase, double expose, int ndiv,
+                        const vector<Lcurve::Point>& surf)
+{
+    double sum = 0.0;
 
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+:sum) schedule(static) \
+                     if(!omp_in_parallel())
+#endif
+    for (int nd = 0; nd < ndiv; ++nd) {
+
+        double phi, wgt;
+        if (ndiv==1){ phi=phase; wgt=1.0; }
+        else {
+            phi = phase + expose*(nd - (ndiv-1)/2.0)/(ndiv-1);
+            wgt = (nd==0||nd==ndiv-1)?0.5:1.0;
         }
 
-        earth = Roche::set_earth(cosi, sini, phi);
+        double cosi, sini;
+        Subs::Vec3 earth;
+        earth_vec(iangle, phi, cosi, sini, earth);
 
-        ssum = 0.;
-        // Disc
-        for(long unsigned int i=0; i<disc.size(); i++){
-            mu = Subs::dot(earth, disc[i].dirn);
-            if(mu > 0. && disc[i].visible(phi))
-                ssum += mu*disc[i].flux*(1.-(1.-mu)*(lin_limb_disc+quad_limb_disc*(1.-mu)));
-        }
+        double s = 0.0;
+        for (const auto& pt : surf)
+            s += disc_elem(pt, earth, phi, lin_ld, quad_ld);
 
-        sum += wgt*ssum;
+        sum += wgt * s;
     }
 
-    return sum/std::max(1, ndiv-1);
-
+    return sum / std::max(1, ndiv-1);
 }
 
-/**
- * comp_edge computes the flux from the disc edge at a particular phase. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param lin_limb_disc linear limb darkening coefficient for the disc
- * \param quad_limb_disc quadratic limb darkening for the disc
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param edge     geometry/brightness array for the disc
- * \return the light curve value desired.
- */
+double Lcurve::comp_disc(double iangle,double lin,double quad,
+                         double phase,double expose,int ndiv,double /*q*/,
+                         const vector<Point>& disc)
+{ return disc_like(iangle, lin, quad, phase, expose, ndiv, disc); }
 
-double Lcurve::comp_edge(double iangle, double lin_limb_disc, double quad_limb_disc,
-                         double phase, double expose, int ndiv, double q,
-                         const vector<Lcurve::Point>& edge){
+double Lcurve::comp_edge(double iangle,double lin,double quad,
+                         double phase,double expose,int ndiv,double /*q*/,
+                         const vector<Point>& edge)
+{ return disc_like(iangle, lin, quad, phase, expose, ndiv, edge); }
 
-    const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
-    double ri = Subs::deg2rad(iangle);
-    const double cosi = cos(ri);
-    const double sini = sin(ri);
 
-    Subs::Vec3 earth;
-    double phi, sum=0., ssum, mu, wgt;
-    for(int nd=0; nd<ndiv; nd++){
 
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
+/* =============================================================
+                       comp_spot
+   ============================================================= */
+
+double Lcurve::comp_spot(double iangle,
+                         double phase,double expose,int ndiv,double /*q*/,
+                         const vector<Point>& spot)
+{
+    double sum = 0.0;
+
+#ifdef _OPENMP
+#pragma omp parallel for reduction(+:sum) schedule(static) \
+                     if(!omp_in_parallel())
+#endif
+    for (int nd=0; nd<ndiv; ++nd) {
+
+        double phi, wgt;
+        if (ndiv==1){ phi=phase; wgt=1.0; }
+        else {
+            phi = phase + expose*(nd - (ndiv-1)/2.0)/(ndiv-1);
+            wgt = (nd==0||nd==ndiv-1)?0.5:1.0;
         }
 
-        earth = Roche::set_earth(cosi, sini, phi);
+        double cosi, sini;
+        Subs::Vec3 earth;
+        earth_vec(iangle, phi, cosi, sini, earth);
 
-        ssum = 0.;
-        // Disc edge
-        for(long unsigned int i=0; i<edge.size(); i++){
-            mu = Subs::dot(earth, edge[i].dirn);
-            if(mu > 0. && edge[i].visible(phi))
-                ssum += mu*edge[i].flux*(1.-(1.-mu)*(lin_limb_disc+quad_limb_disc*(1.-mu)));
-        }
+        double s=0.0;
+        for (const auto& pt : spot)
+            s += spot_elem(pt, earth, phi);
 
-        sum += wgt*ssum;
+        sum += wgt*s;
     }
 
-    return sum/std::max(1, ndiv-1);
-
-}
-
-/**
- * comp_spot computes a light curve point for a particular phase. It can
- * allow for finite exposures by trapezoidal integration.
- * \param iangle   orbital inclination
- * \param phase    orbital phase at centre of exposure
- * \param expose   length of exposure in terms of phase
- * \param ndiv     number of sub-divisions for exposure smearing using trapezoidal integration
- * \param q         mass ratio
- * \param vscale   the velocity scale V1+V2 (unprojected) for computation of Doppler beaming
- * \param spot     geometry/brightness array for the bright spot
- * \return the light curve value desired.
- */
-
-double Lcurve::comp_spot(double iangle,double phase, double expose, int ndiv, double q, const vector<Lcurve::Point>& spot){
-
-    const Subs::Vec3 COFM(q/(1.+q),0.,0.), SPIN(0.,0.,1.);
-    double ri = Subs::deg2rad(iangle);
-    const double cosi  = cos(ri);
-    const double sini  = sin(ri);
-
-    Subs::Vec3 earth;
-    double phi, sum=0., ssum, mu, wgt;
-    for(int nd=0; nd<ndiv; nd++){
-
-        if(ndiv == 1){
-            phi = phase;
-            wgt = 1.;
-        }else{
-            phi = phase + expose*(nd-double(ndiv-1)/2.)/(ndiv-1);
-            if(nd == 0 || nd == ndiv-1)
-                wgt = 0.5;
-            else
-                wgt = 1.;
-        }
-        earth = Roche::set_earth(cosi, sini, phi);
-
-        ssum = 0.;
-        // Spot
-        for(long unsigned int i=0; i<spot.size(); i++){
-            mu = Subs::dot(earth, spot[i].dirn);
-            if(mu > 0. && spot[i].visible(phi))
-                ssum += mu*spot[i].flux;
-        }
-
-        sum += wgt*ssum;
-    }
-
-    return sum/std::max(1, ndiv-1);
-
+    return sum / std::max(1, ndiv-1);
 }

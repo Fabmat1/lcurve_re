@@ -3,12 +3,20 @@ project(lcurve_re)
 
 set(CMAKE_CXX_STANDARD 20)
 
-# Check for CUDA
-find_package(CUDA)
-if(CUDA_FOUND)
-    add_definitions(-DHAVE_CUDA)
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -O3 -arch=sm_70")
+cmake_policy(SET CMP0146 NEW)  # Use modern CUDA support
+cmake_policy(SET CMP0167 NEW)  # Use modern Boost support
+
+# Check for CUDA using the modern approach
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
+    add_definitions(-DHAVE_CUDA)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -arch=sm_70")
+    set(CUDA_FOUND TRUE)
+    
+    # Find CUDA toolkit for libraries
+    find_package(CUDAToolkit REQUIRED)
 endif()
 
 # --- Find gnuplot-iostream header (header-only) ---
@@ -23,7 +31,7 @@ endif()
 
 include_directories(${GNUPLOT_IOSTREAM_INCLUDE_DIR})
 
-# --- Find Boost libraries for Filesystem and Iostreams ---
+# --- Find Boost libraries using modern approach ---
 find_package(Boost REQUIRED COMPONENTS filesystem iostreams)
 if(Boost_FOUND)
     message(STATUS "Boost found: ${Boost_VERSION}")
@@ -90,25 +98,26 @@ set(SOURCES
 
 add_library(utilities STATIC ${SOURCES})
 
-
-find_package(OpenMP REQUIRED)          # looks for the compiler’s OpenMP support
+find_package(OpenMP REQUIRED)          # looks for the compiler's OpenMP support
 target_link_libraries(utilities PRIVATE OpenMP::OpenMP_CXX)
 
 # Link CUDA runtime if found
-if(CUDA_FOUND)
-    target_link_libraries(utilities PRIVATE ${CUDA_LIBRARIES})
-    target_include_directories(utilities PUBLIC ${CUDA_INCLUDE_DIRS})
+if(CMAKE_CUDA_COMPILER)
+    target_link_libraries(utilities PRIVATE CUDA::cudart)
+    set_property(TARGET utilities PROPERTY CUDA_ARCHITECTURES 70)
 endif()
 
 add_executable(lcurve_re main.cpp)
 add_executable(lcurve_mcmc new_scripts/mcmc_solver.cpp)
 add_executable(lcurve_simplex new_scripts/simplex.cpp)
+add_executable(lcurve_visualize new_scripts/visualize.cpp)
 add_executable(test new_scripts/test.cpp)
 
 target_link_libraries(lcurve_re PRIVATE utilities)
 target_link_libraries(lcurve_mcmc PRIVATE utilities)
 target_link_libraries(lcurve_simplex PRIVATE utilities)
 target_link_libraries(test PRIVATE utilities)
+target_link_libraries(lcurve_visualize  PRIVATE utilities)
 
 # Find and link nlohmann_json (header-only, no linking needed, just include path)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -122,12 +131,16 @@ target_link_libraries(lcurve_re PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_mcmc PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_simplex PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(test PRIVATE Boost::filesystem Boost::iostreams)
+target_link_libraries(lcurve_visualize PRIVATE Boost::filesystem Boost::iostreams)
 
 # Installation configuration
 include(GNUInstallDirs)
 
 # Install the main executables to bin directory
 install(TARGETS lcurve_re lcurve_mcmc lcurve_simplex
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT Runtime)
+install(TARGETS lcurve_visualize
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT Runtime)
 
@@ -165,7 +178,7 @@ endif()
 
 # ─── SANITISER FLAGS (only meaningful for Clang/GCC & no CUDA) ───
 set(_SAN_FLAGS "")
-if(LCURVE_ENABLE_ASAN AND NOT CUDA_FOUND
+if(LCURVE_ENABLE_ASAN AND NOT CMAKE_CUDA_COMPILER
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     list(APPEND _SAN_FLAGS -fsanitize=address,undefined
                            -fno-omit-frame-pointer)
@@ -201,6 +214,7 @@ set(_LCURVE_ALL_TARGETS
     lcurve_re
     lcurve_mcmc
     lcurve_simplex
+    lcurve_visualize
     test)
 
 foreach(t ${_LCURVE_ALL_TARGETS})

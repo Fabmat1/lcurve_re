@@ -25,3 +25,9 @@ simplex
 ./lcurve_simplex
 install_manifest.txt
 plots/*
+/build
+64292chain_out.txt
+example/6429224373168869632.json
+example/j0658.json
+j0658chain_out.txt
+j0658output.txt

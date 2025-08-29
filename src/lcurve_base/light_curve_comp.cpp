@@ -1,12 +1,5 @@
-// AUTHOR: TOM MARSH
-
 #include "lcurve.h"
-#include "array1d.h"
 #include "constants.h"
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 /** This routine computes the light curve corresponding to a particular
  * model and times defined by some data. Data with negative or zero errors
@@ -227,63 +220,61 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     // which is very likely to be the case. However, since the time per point is
     // large, overheads should not be too bad.
 
-#ifdef _OPENMP
-    int mxth = min(16, omp_get_max_threads());
-    omp_set_num_threads(mxth);
-#pragma omp parallel for schedule(dynamic) if(data.size() > 4)
-#endif
+    #pragma omp parallel
+    {
+    #pragma omp for schedule(dynamic,1)
+        for (size_t np = 0; np < data.size(); np++) {
+            // Compute phase, accounting for quadratic term
+            double phase = (data[np].time - mdl.t0) / mdl.period;
 
-    for (size_t np = 0; np < data.size(); np++) {
-        // Compute phase, accounting for quadratic term
-        double phase = (data[np].time - mdl.t0) / mdl.period;
+            // small Newton-Raphson iteration
+            for (int it = 0; it < 4; it++) {
+                phase -= (mdl.t0 + phase * (mdl.period + mdl.pdot * phase) - data[np].time) /
+                        (mdl.period + 2. * mdl.pdot * phase);
+            }
 
-        // small Newton-Raphson iteration
-        for (int it = 0; it < 4; it++) {
-            phase -= (mdl.t0 + phase * (mdl.period + mdl.pdot * phase) - data[np].time) /
-                    (mdl.period + 2. * mdl.pdot * phase);
-        }
+            // advance/retard by time offset between primary & secondary eclipse
+            phase += mdl.deltat / mdl.period / 2. * (cos(2. * Constants::PI * phase) - 1.);
 
-        // advance/retard by time offset between primary & secondary eclipse
-        phase += mdl.deltat / mdl.period / 2. * (cos(2. * Constants::PI * phase) - 1.);
-
-        double expose = data[np].expose / mdl.period;
-        double frac = (data[np].time - middle) / range;
-        double slfac = 1. + frac * (mdl.slope + frac * (mdl.quad + frac * mdl.cube));
-        if (mdl.iscale) {
-            fcomp[np][0] = slfac * comp_star1(mdl.iangle, ldc1, phase, expose,
-                                              data[np].ndiv, mdl.q,
-                                              mdl.beam_factor1, mdl.velocity_scale,
-                                              gint, star1f, star1c);
-
-            fcomp[np][1] = slfac * comp_disc(mdl.iangle, mdl.lin_limb_disc,
-                                             mdl.quad_limb_disc, phase, expose,
-                                             data[np].ndiv, mdl.q,
-                                             disc);
-
-            fcomp[np][2] = slfac * comp_edge(mdl.iangle, mdl.lin_limb_disc,
-                                             mdl.quad_limb_disc, phase, expose,
-                                             data[np].ndiv, mdl.q,
-                                             edge);
-
-            fcomp[np][3] = slfac * comp_spot(mdl.iangle, phase, expose,
-                                             data[np].ndiv, mdl.q,
-                                             spot);
-
-            if (mdl.t2 > 0)
-                fcomp[np][4] = slfac * comp_star2(mdl.iangle, ldc2, phase, expose,
+            double expose = data[np].expose / mdl.period;
+            double frac = (data[np].time - middle) / range;
+            double slfac = 1. + frac * (mdl.slope + frac * (mdl.quad + frac * mdl.cube));
+            if (mdl.iscale) {
+                fcomp[np][0] = slfac * comp_star1(mdl.iangle, ldc1, phase, expose,
                                                   data[np].ndiv, mdl.q,
-                                                  mdl.beam_factor2,
-                                                  mdl.velocity_scale,
-                                                  mdl.glens1, rlens1,
-                                                  gint, star2f, star2c);
-        } else {
-            calc[np] = slfac * comp_light(mdl.iangle, ldc1, ldc2,
-                                          mdl.lin_limb_disc, mdl.quad_limb_disc,
-                                          phase, expose, data[np].ndiv,
-                                          mdl.q, mdl.beam_factor1, mdl.beam_factor2,
-                                          mdl.spin1, mdl.spin2, mdl.velocity_scale,
-                                          mdl.glens1, rlens1, gint, star1f, star2f,
-                                          star1c, star2c, disc, edge, spot) + mdl.third;
+                                                  mdl.beam_factor1, mdl.velocity_scale,
+                                                  gint, star1f, star1c);
+
+                fcomp[np][1] = slfac * comp_disc(mdl.iangle, mdl.lin_limb_disc,
+                                                 mdl.quad_limb_disc, phase, expose,
+                                                 data[np].ndiv, mdl.q,
+                                                 disc);
+
+                fcomp[np][2] = slfac * comp_edge(mdl.iangle, mdl.lin_limb_disc,
+                                                 mdl.quad_limb_disc, phase, expose,
+                                                 data[np].ndiv, mdl.q,
+                                                 edge);
+
+                fcomp[np][3] = slfac * comp_spot(mdl.iangle, phase, expose,
+                                                 data[np].ndiv, mdl.q,
+                                                 spot);
+
+                if (mdl.t2 > 0)
+                    fcomp[np][4] = slfac * comp_star2(mdl.iangle, ldc2, phase, expose,
+                                                      data[np].ndiv, mdl.q,
+                                                      mdl.beam_factor2,
+                                                      mdl.velocity_scale,
+                                                      mdl.glens1, rlens1,
+                                                      gint, star2f, star2c);
+            } else {
+                calc[np] = slfac * comp_light(mdl.iangle, ldc1, ldc2,
+                                              mdl.lin_limb_disc, mdl.quad_limb_disc,
+                                              phase, expose, data[np].ndiv,
+                                              mdl.q, mdl.beam_factor1, mdl.beam_factor2,
+                                              mdl.spin1, mdl.spin2, mdl.velocity_scale,
+                                              mdl.glens1, rlens1, gint, star1f, star2f,
+                                              star1c, star2c, disc, edge, spot) + mdl.third;
+            }
         }
     }
 
