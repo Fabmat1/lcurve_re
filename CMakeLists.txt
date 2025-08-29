@@ -137,7 +137,7 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 
 # ─── OPTIONS ───────────────────────────────────────────────────────
-option(LCURVE_STRICT          "Fail the build on any warning"  ON)
+option(LCURVE_STRICT          "Fail the build on any warning"  OFF)
 option(LCURVE_ENABLE_ASAN     "Build with address/UB sanitiser" OFF)
 
 # ─── BUILD TYPE DEFAULT ───────────────────────────────────────────

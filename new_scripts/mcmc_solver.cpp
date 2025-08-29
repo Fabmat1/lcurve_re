@@ -13,10 +13,35 @@
 #include "../src/new_subs.h"
 #include "../src/mass_ratio_pdf.h"
 #include <cmath>
+#include <sys/ioctl.h>   // TIOCGWINSZ
+#include <unistd.h>      // STDOUT_FILENO
+#include <signal.h>
+#include <atomic>
 
 using namespace std;
 using json = nlohmann::json;
 using Clock = chrono::steady_clock;
+
+inline int current_tty_columns()
+{
+    winsize ws{};
+    if (::isatty(STDOUT_FILENO) == 0) {
+        return 80;
+    }
+
+    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1) {
+        return 80;
+    }
+
+    return ws.ws_col ? ws.ws_col : 80;
+}
+
+std::atomic<int> tty_cols{ current_tty_columns() };
+
+void sigwinch_handler(int) {
+    tty_cols.store(current_tty_columns(), std::memory_order_relaxed);
+}
+
 
 // Add these function definitions (or in a header file)
 double log_gaussian_pdf(double x, double mean, double sigma) {
@@ -33,11 +58,27 @@ double log_split_normal_pdf(double x, double mean, double sigma_left, double sig
     }
 }
 
+std::size_t visual_length(const std::string& s)
+{
+    std::size_t len = 0;
+    bool esc = false;
+    for (char c : s) {
+        if (esc) {                    // inside “\033[ …”
+            if (c == 'm') esc = false;
+            continue;
+        }
+        if (c == '\033') { esc = true; continue; }
+        ++len;
+    }
+    return len;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         cerr << "Usage: " << argv[0] << " <config_file.json>" << endl;
         return 1;
     }
+    ::signal(SIGWINCH, sigwinch_handler);    // react to window-resize
     // Load model and configuration
     string config_file = argv[1];
     auto model_config = Helpers::load_model_and_config_from_json(config_file);
@@ -85,7 +126,6 @@ int main(int argc, char* argv[]) {
     int nsteps            = config.value("mcmc_steps", 25000);
     int burn_in           = config.value("mcmc_burn_in", nsteps/4);
     int progress_interval = config.value("progress_interval", 50);
-    int bar_width         = config.value("progress_bar_width", 50);
 
     // ANSI color codes
     const string RESET = "\033[0m";
@@ -196,98 +236,127 @@ int main(int argc, char* argv[]) {
     // MCMC
     for (int step = 0; step < nsteps; ++step) {
         // Enhanced Progress bar with colors and better formatting
-        if (step % progress_interval == 0) {
-            double fraction = double(step) / nsteps;
-            int pos = int(bar_width * fraction);
-            
-            auto now = Clock::now();
+        /*------ adaptive, never-overflowing, auto-shrinking progress line --------*/
+        if (step % progress_interval == 0)
+        {   
+
+            /* ---------- fraction, percentage and ETA -------------------------- */
+            const double fraction  = double(step) / nsteps;
+            const int    percent   = int(fraction * 100.0 + 0.5);
+
+            auto now       = Clock::now();
             double elapsed = chrono::duration<double>(now - t_start).count();
-            double est_total = elapsed / max(fraction, 1e-8);
-            double eta = est_total - elapsed;
-            
-            // Format ETA with better time display
-            int eta_i = int(eta);
-            int h = eta_i / 3600;
-            int m = (eta_i % 3600) / 60;
-            int s = eta_i % 60;
-            
-            string eta_str;
-            if (h > 0) {
-                eta_str = string(h < 10 ? "0" : "") + to_string(h) + ":" + 
-                         string(m < 10 ? "0" : "") + to_string(m) + ":" + 
-                         string(s < 10 ? "0" : "") + to_string(s);
-            } else if (m > 0) {
-                eta_str = string(m < 10 ? "0" : "") + to_string(m) + ":" + 
-                         string(s < 10 ? "0" : "") + to_string(s);
-            } else {
-                eta_str = to_string(s) + "s";
+            double eta_s   = elapsed / std::max(fraction, 1e-8) - elapsed;
+            eta_s          = std::max(0.0, eta_s);
+            int eta_i      = int(eta_s);
+            int h = eta_i / 3600, m = (eta_i % 3600) / 60, s = eta_i % 60;
+            char eta_txt[16];
+            (h)   ? snprintf(eta_txt, sizeof eta_txt, "%02d:%02d:%02d", h, m, s)
+                  : (m) ? snprintf(eta_txt, sizeof eta_txt, "%02d:%02d", m, s)
+                         : snprintf(eta_txt, sizeof eta_txt, "%ds", s);
+
+            /* ---------- acceptance rate (window) ------------------------------ */
+            double acc_rate = acc_window.empty() ? -1.0
+                                                 : 100.0 * window_accept_count / acc_window.size();
+
+            /* ---------- build the prefix (“MCMC [”) --------------------------- */
+            std::ostringstream oss_prefix;
+            oss_prefix << "\r" << RESET << "[";
+
+            /* ---------- build the variable suffix parts ----------------------- */
+            struct Chunk { std::string txt; int prio; };          // prio low -> removed first
+            std::vector<Chunk> chunks;
+
+            /* percentage ------------------------------------------------------- */
+            {
+                std::ostringstream tmp;
+                if (percent >= 90)        tmp << BRIGHT_GREEN;
+                else if (percent >= 50)   tmp << BRIGHT_BLUE;
+                else                      tmp << BRIGHT_YELLOW;
+                tmp << std::setw(3) << percent << "%" << RESET;
+                chunks.push_back({tmp.str(), 99});                // never removed
             }
-            
-            // Compute acceptance rate over sliding window
-            double acc_rate = 0.0;
-            if (!acc_window.empty()) {
-                acc_rate = double(window_accept_count) / acc_window.size() * 100.0;
-            } else {
-                acc_rate = -10.0;
+
+            /* acceptance rate -------------------------------------------------- */
+            {
+                std::ostringstream tmp;
+                if (acc_rate < 0)
+                    tmp << DIM << " │ Acc burn-in" << RESET;
+                else {
+                    tmp << " │ ";
+                    if (acc_rate >= 20 && acc_rate <= 50)
+                        tmp << BRIGHT_GREEN;
+                    else if (acc_rate < 20)
+                        tmp << BRIGHT_RED;
+                    else
+                        tmp << BRIGHT_YELLOW;
+                    tmp << "Acc " << std::fixed << std::setprecision(1)
+                        << acc_rate << "%" << RESET;
+                }
+                chunks.push_back({tmp.str(), 30});                // prio 30
             }
-            
-            // Progress bar with gradient effect
-            cout << "\r" << BRIGHT_WHITE << "MCMC " << RESET;
-            cout << "[";
-            
-            for (int i = 0; i < bar_width; ++i) {
-                if (i < pos) {
-                    // Gradient effect: green to blue
-                    if (i < pos * 0.6) {
-                        cout << BRIGHT_GREEN << "█" << RESET;
-                    } else if (i < pos * 0.8) {
-                        cout << BRIGHT_CYAN << "█" << RESET;
-                    } else {
-                        cout << BRIGHT_BLUE << "█" << RESET;
+
+            /* step counter ----------------------------------------------------- */
+            {
+                std::ostringstream tmp;
+                tmp << " │ " << DIM << step << "/" << nsteps << RESET;
+                chunks.push_back({tmp.str(), 20});                // prio 20
+            }
+
+            /* ETA -------------------------------------------------------------- */
+            {
+                std::ostringstream tmp;
+                tmp << " │ " << BRIGHT_CYAN << "⏱ " << eta_txt << RESET;
+                chunks.push_back({tmp.str(), 10});                // prio 10  (first to drop)
+            }
+
+            /* sort by priority (lowest prio removed first) --------------------- */
+            std::sort(chunks.begin(), chunks.end(),
+                      [](const Chunk& a, const Chunk& b){ return a.prio < b.prio; });
+
+            /* ---------- decide what can still be shown ------------------------ */
+            const int cols = tty_cols.load(std::memory_order_relaxed);
+            const int min_bar = 6;                                // we insist on 6 cells
+
+            for (std::size_t remove = 0; remove <= chunks.size(); ++remove)
+            {
+                /* assemble suffix that keeps the last (chunks.size()-remove) parts */
+                std::string suffix;
+                for (std::size_t i = remove; i < chunks.size(); ++i)
+                    suffix += chunks[i].txt;
+                suffix = "] " + suffix;                           // bar-closing bracket
+
+                const int occupied =
+                    int(visual_length(oss_prefix.str()) + visual_length(suffix));
+
+                if (occupied + min_bar <= cols)
+                {
+                    /* fits – build the final bar length and print -------------- */
+                    const int bar_cells   = cols - occupied;
+                    const int bar_filled  = int(bar_cells * fraction);
+
+                    std::string bar; bar.reserve(bar_cells);
+                    for (int i = 0; i < bar_cells; ++i)
+                    {
+                        if (i < bar_filled) {
+                            if      (i < bar_cells * 0.6)
+                                bar += BRIGHT_GREEN + std::string("█") + RESET;
+                            else if (i < bar_cells * 0.8)
+                                bar += BRIGHT_CYAN  + std::string("█") + RESET;
+                            else
+                                bar += BRIGHT_BLUE  + std::string("█") + RESET;
+                        }
+                        else if (i == bar_filled && fraction < 1.0)
+                            bar += BRIGHT_WHITE + std::string("▌") + RESET;
+                        else
+                            bar += DIM + std::string("░") + RESET;
                     }
-                } else if (i == pos && fraction < 1.0) {
-                    // Show current position with a different character
-                    cout << BRIGHT_WHITE << "▌" << RESET;
-                } else {
-                    cout << DIM << "░" << RESET;
+
+                    std::cout << oss_prefix.str() << bar << suffix << std::flush;
+                    break;
                 }
+                /* else: not enough room – try again with one more chunk removed */
             }
-            
-            cout << "] ";
-            
-            // Progress percentage with color coding
-            int percent = int(fraction * 100);
-            if (percent >= 90) {
-                cout << BRIGHT_GREEN << percent << "%" << RESET;
-            } else if (percent >= 50) {
-                cout << BRIGHT_BLUE << percent << "%" << RESET;
-            } else {
-                cout << BRIGHT_YELLOW << percent << "%" << RESET;
-            }
-            
-            // Acceptance rate with color coding
-            if (acc_rate >= 0) {
-                cout << " │ ";
-                if (acc_rate >= 20 && acc_rate <= 50) {
-                    cout << BRIGHT_GREEN << "Acc " << fixed << setprecision(1) << acc_rate << "%" << RESET;
-                } else if (acc_rate < 20) {
-                    cout << BRIGHT_RED << "Acc " << fixed << setprecision(1) << acc_rate << "%" << RESET;
-                } else {
-                    cout << BRIGHT_YELLOW << "Acc " << fixed << setprecision(1) << acc_rate << "%" << RESET;
-                }
-            } else {
-                cout << " │ " << DIM << "Acc burn-in" << RESET;
-            }
-            
-            // ETA with icon
-            cout << " │ " << BRIGHT_CYAN << "⏱ " << eta_str << RESET;
-            
-            // Add iteration info
-            cout << " │ " << DIM << step << "/" << nsteps << RESET;
-            
-            // Add some padding to clear any leftover characters
-            cout << "    ";
-            cout.flush();
         }
         // Propose
         Subs::Array1D<double> prop = current_pars;
@@ -347,20 +416,6 @@ int main(int argc, char* argv[]) {
        bool this_accept = false;
        double log_alpha = -0.5 * (chp - current_chisq) + (log_prior_prop - log_prior_current);
        
-       if (log_alpha >= 0.0 || log(uni(rng)) < log_alpha) {
-           current_pars = prop;
-           log_prior_current = log_prior_prop;
-           current_chisq = chp;
-           ++accepted;
-           this_accept = true;
-           if (chp < best_chisq) {
-               best_chisq = chp;
-               best_pars = prop;
-           }
-       } else {
-           model.set_param(current_pars);
-       }
-
         if (log_alpha >= 0.0 || log(uni(rng)) < log_alpha) {
             current_pars = prop;
             log_prior_current = log_prior_prop;
