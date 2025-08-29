@@ -2,10 +2,11 @@
 #include "iostream"
 #include "ldc.h"
 #include <nlohmann/json.hpp>
-using json = nlohmann::json;
-using namespace std;
+
 
 namespace Lcurve {
+    using json = nlohmann::json;
+    using namespace std;
     Model::Model(const json& config) {
         // List of parameter names to expect, both physical and computational used
         // for checking that we actually have read in all the ones expected

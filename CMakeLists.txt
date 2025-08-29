@@ -112,6 +112,7 @@ target_link_libraries(test PRIVATE utilities)
 
 # Find and link nlohmann_json (header-only, no linking needed, just include path)
 find_package(nlohmann_json CONFIG REQUIRED)
+message(STATUS "nlohmann_json version: ${nlohmann_json_VERSION}")
 target_link_libraries(lcurve_re PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lcurve_mcmc PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lcurve_simplex PRIVATE nlohmann_json::nlohmann_json)

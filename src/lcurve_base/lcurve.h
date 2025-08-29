@@ -11,12 +11,14 @@
 #include "../lroche_base/roche.h"
 #include "nlohmann/json.hpp"
 
-using json = nlohmann::json;
+
 
 //! Lcurve namespace. Stuff to do with light curve modelling.
-using namespace std;
+
 
 namespace Lcurve {
+    using namespace std;
+    using json = nlohmann::json;
     enum Star { STAR1, STAR2 };
 
     //! Name of environment variable containing name of defaults directory
