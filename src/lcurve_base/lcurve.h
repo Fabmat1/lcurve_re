@@ -249,7 +249,7 @@ namespace Lcurve {
     //! Model structure
     struct Model {
         // Constructors and public methods
-        Model(json config);
+        Model(const json& config);
 
         int nvary() const;
 

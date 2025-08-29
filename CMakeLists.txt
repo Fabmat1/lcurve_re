@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.28.3)
+cmake_minimum_required(VERSION 3.22.3)
 project(lcurve_re)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 
 # Check for CUDA
 find_package(CUDA)
@@ -97,7 +97,7 @@ target_link_libraries(utilities PRIVATE OpenMP::OpenMP_CXX)
 
 # Link CUDA runtime if found
 if(CUDA_FOUND)
-    target_link_libraries(utilities ${CUDA_LIBRARIES})
+    target_link_libraries(utilities PRIVATE ${CUDA_LIBRARIES})
     target_include_directories(utilities PUBLIC ${CUDA_INCLUDE_DIRS})
 endif()
 
