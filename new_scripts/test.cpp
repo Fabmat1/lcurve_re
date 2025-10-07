@@ -419,29 +419,30 @@ int main() {
     
 
     // ───────────────────────────────────────────────────────────────
-    // 12) 2-D PDF heat-maps   ( i vs q  |  i vs r_s )
+    // 12) 2-D PDF heat-maps   ( i vs q  |  i vs r_s  |  i vs v_s )
     // ───────────────────────────────────────────────────────────────
     try
     {
         Gnuplot gp3;
 
         /* ----------------------------------------------------------------
-           Build a reasonably fine grid in (inclination,q) and (inclination,r_s)
-           that covers the *full* range that is actually tabulated in the
-           MassRatioPDFGrid.  We do not have direct access to the internal
-           min / max – but they are printed by print_grid_info(), so just
-           copy them here (or change them by hand if you adjust the grid).
+           Build a reasonably fine grid in (inclination,q), (inclination,r_s),
+           and (inclination,v_s) that covers the *full* range that is actually 
+           tabulated in the MassRatioPDFGrid.
            ---------------------------------------------------------------- */
         const double I_MIN = 15.0;   // deg   (must match initialise-call!)
         const double I_MAX = 90.0;   // deg
-        const double Q_MIN = 0.7;    // good generic range; outside grid gives 1e-12
+        const double Q_MIN = 0.7;  
         const double Q_MAX = 3.5;
         const double RS_MIN = 0.07;
-        const double RS_MAX = 0.15; // 0.01 ≃ 1 % of a solar radius / a~few days
+        const double RS_MAX = 0.15;
+        const double VS_MIN = 200.0;  // km/s
+        const double VS_MAX = 800.0;  // km/s
 
-        const int NI  = 500;         // same density that the grid itself uses
-        const int NQ  = 500;         // enough to make the map smooth
-        const int NRS = 500;
+        const int NI  = 100;         // reduced for speed, increase if needed
+        const int NQ  = 100;         
+        const int NRS = 100;
+        const int NVS = 100;
 
         /* -------------- build inclination vector (inclusive end points) */
         std::vector<double> I_vals(NI);
@@ -455,11 +456,15 @@ int main() {
         std::vector<double> RS_vals(NRS);
         for (int k = 0; k < NRS; ++k)
             RS_vals[k] = RS_MIN + k * (RS_MAX - RS_MIN) / (NRS - 1);
+            
+        std::vector<double> VS_vals(NVS);
+        for (int k = 0; k < NVS; ++k)
+            VS_vals[k] = VS_MIN + k * (VS_MAX - VS_MIN) / (NVS - 1);
 
         /* ------------------  data block :  i  vs  q  ------------------- */
         gp3 << "$IQ_PDF << EOD\n";
         for (double inc : I_vals)
-        {
+        {   
             for (double q : Q_vals)
             {
                 double pdf = mass_ratio_pdf(inc, q);
@@ -481,31 +486,54 @@ int main() {
             gp3 << "\n";
         }
         gp3 << "EOD\n";
+        
+        /* ------------------  data block :  i  vs  v_s  ----------------- */
+        gp3 << "$IVS_PDF << EOD\n";
+        for (double inc : I_vals)
+        {
+            for (double vs : VS_vals)
+            {
+                double pdf = velocity_scale_pdf(inc, vs);
+                gp3 << inc << " " << vs << " " << pdf << "\n";
+            }
+            gp3 << "\n";
+        }
+        gp3 << "EOD\n";
 
         /* ------------------------- plotting ---------------------------- */
-        gp3 << "set term qt size 1000,450\n";
-        gp3 << "set multiplot layout 1,2 title '2-D PDF maps (log colour-scale)'\n";
+        gp3 << "set term qt size 1500,450\n";
+        gp3 << "set multiplot layout 1,3 title '2-D PDF maps (log colour-scale)'\n";
 
         // ----- panel 1 :  i  vs q
-        gp3 << "set xlabel 'Inclination  i  [deg]'\n";
-        gp3 << "set ylabel 'Mass ratio  q'\n";
+        gp3 << "set xlabel 'Inclination i [deg]'\n";
+        gp3 << "set ylabel 'Mass ratio q'\n";
         gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
         gp3 << "set yrange [" << Q_MIN << ":" << Q_MAX << "]\n";
-        //gp3 << "set logscale cb\n";
-        gp3 << "set cbrange [1e-2:0.7]\n";        // <-- colour scale only 10⁻4 … 2
+        gp3 << "unset logscale cb\n";  // LINEAR scale
+        gp3 << "set cbrange [0.01:0.7]\n";
+        
         gp3 << "set cblabel 'PDF(i,q)'\n";
         gp3 << "unset key\n";
         gp3 << "set pm3d map\n";
         gp3 << "splot $IQ_PDF using 1:2:3 notitle\n";
 
         // ----- panel 2 :  i  vs r_s
-        gp3 << "set xlabel 'Inclination  i  [deg]'\n";
-        gp3 << "set ylabel 'Radius-scale  r_s'\n";
+        gp3 << "set xlabel 'Inclination i [deg]'\n";
+        gp3 << "set ylabel 'Radius-scale r_s'\n";
         gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
         gp3 << "set yrange [" << RS_MIN << ":" << RS_MAX << "]\n";
-        gp3 << "set cbrange [0.1:100.0]\n";        // INDEPENDENT colorbar range for PDF(i,r_s)
+        gp3 << "set cbrange [0.01:100.0]\n";
         gp3 << "set cblabel 'PDF(i,r_s)'\n";
         gp3 << "splot $IRS_PDF using 1:2:3 notitle\n";
+        
+        // ----- panel 3 :  i  vs v_s
+        gp3 << "set xlabel 'Inclination i [deg]'\n";
+        gp3 << "set ylabel 'Velocity-scale v_s [km/s]'\n";
+        gp3 << "set xrange [" << I_MIN << ":" << I_MAX << "]\n";
+        gp3 << "set yrange [" << VS_MIN << ":" << VS_MAX << "]\n";
+        gp3 << "set cbrange [0.001:0.01]\n";
+        gp3 << "set cblabel 'PDF(i,v_s)'\n";
+        gp3 << "splot $IVS_PDF using 1:2:3 notitle\n";
 
         gp3 << "unset multiplot\n";
 
@@ -553,12 +581,270 @@ int main() {
     std::cout << "  Mean: " << rs_mean << ", Std: " << rs_std << std::endl;
     std::cout << "  Range: [" << rs_min_s << ", " << rs_max_s << "]" << std::endl;
     
+
+    // ───────────────────────────────────────────────────────────────
+    // 13) Mock MCMC Sampler using only log prior
+    // ───────────────────────────────────────────────────────────────
+    std::cout << "\n=== Mock MCMC Sampler Test ===" << std::endl;
+    std::cout << "Running MCMC with log_combined() as the sole acceptance criterion..." << std::endl;
+    
+    // MCMC parameters
+    const int n_mcmc_steps = 10000000;
+    const int burn_in = 100000;
+    const int thin = 2;  // Keep every 2nd sample to reduce correlation
+    
+    // Initialize random number generator
+    std::mt19937 rng(42);  // Fixed seed for reproducibility
+    std::uniform_real_distribution<> uniform(0.0, 1.0);
+    
+    // Define parameter ranges and step sizes
+    const double i_min = 15.0, i_max = 90.0;
+    const double q_min = 0.7, q_max = 3.5;
+    const double vs_min = 200.0, vs_max = 800.0;
+    const double rs_min = 0.07, rs_max = 0.15;
+    
+    // Step sizes for proposals (tune these for ~25-50% acceptance)
+    const double i_step = 2.0;    // degrees
+    const double q_step = 0.05;   
+    const double vs_step = 10.0;  // km/s
+    const double rs_step = 0.002; 
+    
+    // Initialize chain at random valid point
+    std::uniform_real_distribution<> i_init(i_min, i_max);
+    std::uniform_real_distribution<> q_init(q_min, q_max);
+    std::uniform_real_distribution<> vs_init(vs_min, vs_max);
+    std::uniform_real_distribution<> rs_init(rs_min, rs_max);
+    
+    double current_i = i_init(rng);
+    double current_q = q_init(rng);
+    double current_vs = vs_init(rng);
+    double current_rs = rs_init(rng);
+    
+    // Make sure we start at a valid point
+    while (!check_in_bounds(current_i, current_q, current_vs, current_rs)) {
+        current_i = i_init(rng);
+        current_q = q_init(rng);
+        current_vs = vs_init(rng);
+        current_rs = rs_init(rng);
+    }
+    
+    double current_log_p = log_mass_ratio_pdf(current_i, current_q, current_vs, current_rs);
+    
+    // Storage for samples
+    std::vector<double> i_samples, q_samples, vs_samples, rs_samples;
+    i_samples.reserve((n_mcmc_steps - burn_in) / thin);
+    q_samples.reserve((n_mcmc_steps - burn_in) / thin);
+    vs_samples.reserve((n_mcmc_steps - burn_in) / thin);
+    rs_samples.reserve((n_mcmc_steps - burn_in) / thin);
+    
+    // Counters
+    int accepted = 0;
+    int total_proposed = 0;
+    
+    // Run MCMC
+    auto mcmc_start = std::chrono::high_resolution_clock::now();
+    
+    for (int step = 0; step < n_mcmc_steps; ++step) {
+        // Progress indicator
+        if (step % 100000 == 0 && step > 0) {
+            double accept_rate = (double)accepted / total_proposed;
+            std::cout << "  Step " << step << "/" << n_mcmc_steps 
+                      << ", Acceptance rate: " << std::fixed << std::setprecision(2) 
+                      << accept_rate * 100 << "%" << std::endl;
+        }
+        
+        // Propose new state (Gaussian proposal)
+        std::normal_distribution<> i_prop(current_i, i_step);
+        std::normal_distribution<> q_prop(current_q, q_step);
+        std::normal_distribution<> vs_prop(current_vs, vs_step);
+        std::normal_distribution<> rs_prop(current_rs, rs_step);
+        
+        double proposed_i = i_prop(rng);
+        double proposed_q = q_prop(rng);
+        double proposed_vs = vs_prop(rng);
+        double proposed_rs = rs_prop(rng);
+        
+        // Check bounds
+        if (proposed_i < i_min || proposed_i > i_max ||
+            proposed_q < q_min || proposed_q > q_max ||
+            proposed_vs < vs_min || proposed_vs > vs_max ||
+            proposed_rs < rs_min || proposed_rs > rs_max ||
+            !check_in_bounds(proposed_i, proposed_q, proposed_vs, proposed_rs)) {
+            // Reject out of bounds
+            total_proposed++;
+        } else {
+            // Calculate acceptance probability
+            double proposed_log_p = log_mass_ratio_pdf(proposed_i, proposed_q, proposed_vs, proposed_rs);
+            double log_ratio = proposed_log_p - current_log_p;
+            
+            // Metropolis-Hastings acceptance
+            total_proposed++;
+            if (log_ratio > 0 || log(uniform(rng)) < log_ratio) {
+                // Accept
+                current_i = proposed_i;
+                current_q = proposed_q;
+                current_vs = proposed_vs;
+                current_rs = proposed_rs;
+                current_log_p = proposed_log_p;
+                accepted++;
+            }
+        }
+        
+        // Store sample (after burn-in and thinning)
+        if (step >= burn_in && (step - burn_in) % thin == 0) {
+            i_samples.push_back(current_i);
+            q_samples.push_back(current_q);
+            vs_samples.push_back(current_vs);
+            rs_samples.push_back(current_rs);
+        }
+    }
+    
+    auto mcmc_end = std::chrono::high_resolution_clock::now();
+    auto mcmc_duration = std::chrono::duration_cast<std::chrono::seconds>(mcmc_end - mcmc_start);
+    
+    std::cout << "\nMCMC completed in " << mcmc_duration.count() << " seconds" << std::endl;
+    std::cout << "Final acceptance rate: " << (double)accepted/total_proposed * 100 << "%" << std::endl;
+    std::cout << "Number of samples collected: " << i_samples.size() << std::endl;
+    
+    // ───────────────────────────────────────────────────────────────
+    // Create 2D histograms from MCMC samples
+    // ───────────────────────────────────────────────────────────────
+    std::cout << "\nCreating 2D histograms from MCMC samples..." << std::endl;
+    
+    // Helper function to create 2D histogram
+    auto make_2d_histogram = [](const std::vector<double>& x_data, 
+                                const std::vector<double>& y_data,
+                                double x_min, double x_max, int nx_bins,
+                                double y_min, double y_max, int ny_bins) {
+        std::vector<std::vector<double>> hist(nx_bins, std::vector<double>(ny_bins, 0.0));
+        std::vector<double> x_centers(nx_bins);
+        std::vector<double> y_centers(ny_bins);
+        
+        double dx = (x_max - x_min) / nx_bins;
+        double dy = (y_max - y_min) / ny_bins;
+        
+        for (int i = 0; i < nx_bins; ++i) {
+            x_centers[i] = x_min + (i + 0.5) * dx;
+        }
+        for (int j = 0; j < ny_bins; ++j) {
+            y_centers[j] = y_min + (j + 0.5) * dy;
+        }
+        
+        // Fill histogram
+        for (size_t k = 0; k < x_data.size(); ++k) {
+            int i = static_cast<int>((x_data[k] - x_min) / dx);
+            int j = static_cast<int>((y_data[k] - y_min) / dy);
+            if (i >= 0 && i < nx_bins && j >= 0 && j < ny_bins) {
+                hist[i][j] += 1.0;
+            }
+        }
+        
+        // Normalize to density
+        double total = x_data.size() * dx * dy;
+        for (int i = 0; i < nx_bins; ++i) {
+            for (int j = 0; j < ny_bins; ++j) {
+                hist[i][j] /= total;
+            }
+        }
+        
+        return std::make_tuple(hist, x_centers, y_centers);
+    };
+    
+    // Create histograms
+    const int hist_bins = 50;
+    auto [hist_iq, i_centers, q_centers] = make_2d_histogram(
+        i_samples, q_samples, i_min, i_max, hist_bins, q_min, q_max, hist_bins);
+    auto [hist_irs, i_centers2, rs_centers] = make_2d_histogram(
+        i_samples, rs_samples, i_min, i_max, hist_bins, rs_min, rs_max, hist_bins);
+    auto [hist_ivs, i_centers3, vs_centers] = make_2d_histogram(
+        i_samples, vs_samples, i_min, i_max, hist_bins, vs_min, vs_max, hist_bins);
+    
+    // ───────────────────────────────────────────────────────────────
+    // Plot MCMC results as heatmaps
+    // ───────────────────────────────────────────────────────────────
+    try {
+        Gnuplot gp_mcmc;
+        
+        // Send histogram data
+        gp_mcmc << "$MCMC_IQ << EOD\n";
+        for (int i = 0; i < hist_bins; ++i) {
+            for (int j = 0; j < hist_bins; ++j) {
+                if (hist_iq[i][j] > 0) {  // Only plot non-zero bins
+                    gp_mcmc << i_centers[i] << " " << q_centers[j] << " " << hist_iq[i][j] << "\n";
+                }
+            }
+            gp_mcmc << "\n";
+        }
+        gp_mcmc << "EOD\n";
+        
+        gp_mcmc << "$MCMC_IRS << EOD\n";
+        for (int i = 0; i < hist_bins; ++i) {
+            for (int j = 0; j < hist_bins; ++j) {
+                if (hist_irs[i][j] > 0) {
+                    gp_mcmc << i_centers2[i] << " " << rs_centers[j] << " " << hist_irs[i][j] << "\n";
+                }
+            }
+            gp_mcmc << "\n";
+        }
+        gp_mcmc << "EOD\n";
+        
+        gp_mcmc << "$MCMC_IVS << EOD\n";
+        for (int i = 0; i < hist_bins; ++i) {
+            for (int j = 0; j < hist_bins; ++j) {
+                if (hist_ivs[i][j] > 0) {
+                    gp_mcmc << i_centers3[i] << " " << vs_centers[j] << " " << hist_ivs[i][j] << "\n";
+                }
+            }
+            gp_mcmc << "\n";
+        }
+        gp_mcmc << "EOD\n";
+        
+        // Plot
+        gp_mcmc << "set term qt size 1500,450\n";
+        gp_mcmc << "set multiplot layout 1,3 title 'MCMC Samples from Prior Distribution'\n";
+        
+        // Panel 1: i vs q
+        gp_mcmc << "set xlabel 'Inclination i [deg]'\n";
+        gp_mcmc << "set ylabel 'Mass ratio q'\n";
+        gp_mcmc << "set xrange [" << i_min << ":" << i_max << "]\n";
+        gp_mcmc << "set yrange [" << q_min << ":" << q_max << "]\n";
+        gp_mcmc << "unset logscale cb\n";
+        gp_mcmc << "set cbrange [1e-5:*]\n";
+        gp_mcmc << "set cblabel 'Density'\n";
+        gp_mcmc << "unset key\n";
+        gp_mcmc << "set pm3d map\n";
+        gp_mcmc << "set pm3d interpolate 2,2\n";
+        gp_mcmc << "splot $MCMC_IQ using 1:2:3 with pm3d notitle\n";
+        
+        // Panel 2: i vs r_s
+        gp_mcmc << "set xlabel 'Inclination i [deg]'\n";
+        gp_mcmc << "set ylabel 'Radius-scale r_s'\n";
+        gp_mcmc << "set xrange [" << i_min << ":" << i_max << "]\n";
+        gp_mcmc << "set yrange [" << rs_min << ":" << rs_max << "]\n";
+        gp_mcmc << "set cbrange [1e-5:*]\n";
+        gp_mcmc << "set cblabel 'Density'\n";
+        gp_mcmc << "splot $MCMC_IRS using 1:2:3 with pm3d notitle\n";
+        
+        // Panel 3: i vs v_s
+        gp_mcmc << "set xlabel 'Inclination i [deg]'\n";
+        gp_mcmc << "set ylabel 'Velocity-scale v_s [km/s]'\n";
+        gp_mcmc << "set xrange [" << i_min << ":" << i_max << "]\n";
+        gp_mcmc << "set yrange [" << vs_min << ":" << vs_max << "]\n";
+        gp_mcmc << "set cbrange [1e-6:*]\n";
+        gp_mcmc << "set cblabel 'Density'\n";
+        gp_mcmc << "splot $MCMC_IVS using 1:2:3 with pm3d notitle\n";
+        
+        gp_mcmc << "unset multiplot\n";
+        
+        std::cout << "\nMCMC heatmaps displayed - compare with analytical PDF heatmaps above.\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[MCMC plot ERROR] " << e.what() << std::endl;
+    }
+
+    // Clean up
+    cleanup_mass_ratio_pdf_grid();
     std::cout << "\n=== Test Complete ===" << std::endl;
     std::cout << "Press Enter to exit..." << std::endl;
     std::cin.get();
-    
-    // Clean up
-    cleanup_mass_ratio_pdf_grid();
-    
     return 0;
 }

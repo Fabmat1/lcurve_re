@@ -147,10 +147,9 @@ class MassRatioPDFGrid
 
     /* PDFs on (inclination, parameter) grid */
     std::vector<std::vector<double>> pdf_q, pdf_vs, pdf_rs;
-
-    /* Monte-Carlo samples, used only during construction */
-    struct StripSamples { std::vector<double> q, vs, rs; };
-    std::vector<StripSamples> strips;
+    
+    /* Weight for each inclination bin (to fix normalization) */
+    std::vector<double> incl_weights;
 
 public:
     MassRatioPDFGrid(
@@ -162,8 +161,7 @@ public:
         double i_min,  double i_max, int n_i,
         int n_q_, int n_vs_, int n_rs_, int nsamp_tot)
     : incl_min(i_min), incl_max(i_max), n_incl(n_i),
-      n_q(n_q_), n_vs(n_vs_), n_rs(n_rs_),
-      strips(n_incl)
+      n_q(n_q_), n_vs(n_vs_), n_rs(n_rs_)
     {
         /* -------------------- axis initialisation -------------------- */
         incl_dx = (incl_max - incl_min) / double(n_incl - 1);
@@ -174,66 +172,74 @@ public:
         const auto make_dist = [](double mu, double s)
                                { return std::normal_distribution<double>(mu, s); };
 
-        #pragma omp parallel for schedule(dynamic)
-        for (int idx = 0; idx < n_incl; ++idx)
+        // CHANGE: Sample inclinations continuously from uniform distribution
+        std::vector<double> all_incl, all_q, all_vs, all_rs;
+        all_incl.reserve(nsamp_tot);
+        all_q.reserve(nsamp_tot);
+        all_vs.reserve(nsamp_tot);
+        all_rs.reserve(nsamp_tot);
+        
+        #pragma omp parallel
         {
-            const double inc_deg = inclination_grid[idx];
-            const double sin_i   = std::sin(inc_deg * M_PI / 180.0);
-            if (sin_i < 1e-6) continue;
-
-            std::mt19937_64 gen( std::random_device{}() + idx );
-            auto    d_m1 = make_dist(m1_mu, m1_sig);
-            auto    d_m2 = make_dist(m2_mu, m2_sig);
-            auto    d_K  = make_dist(K_mu , K_sig );
-            auto    d_R  = make_dist(R_mu , R_sig );
-            auto    d_P  = make_dist(P_mu , P_sig );
-
-            const int nsamp_strip = nsamp_tot / n_incl;
-
+            std::mt19937_64 gen(std::random_device{}() + omp_get_thread_num());
+            std::uniform_real_distribution<double> incl_uniform(incl_min, incl_max);
+            
+            auto d_m1 = make_dist(m1_mu, m1_sig);
+            auto d_m2 = make_dist(m2_mu, m2_sig);
+            auto d_K  = make_dist(K_mu , K_sig );
+            auto d_R  = make_dist(R_mu , R_sig );
+            auto d_P  = make_dist(P_mu , P_sig );
+            
             auto draw_pos = [&](auto &dist)
             {
                 while (true) { double v = dist(gen); if (v > 0.0 && std::isfinite(v)) return v; }
             };
-
-            auto &S = strips[idx];
-            S.q .reserve(nsamp_strip);
-            S.vs.reserve(nsamp_strip);
-            S.rs.reserve(nsamp_strip);
-
-            for (int s = 0; s < nsamp_strip; ++s)
+            
+            std::vector<double> local_incl, local_q, local_vs, local_rs;
+            
+            #pragma omp for nowait
+            for (int s = 0; s < nsamp_tot; ++s)
             {
+                // Sample inclination uniformly
+                const double inc_deg = incl_uniform(gen);
+                const double sin_i = std::sin(inc_deg * M_PI / 180.0);
+                if (sin_i < 1e-6) continue;
+                
                 const double m1 = draw_pos(d_m1);
                 const double m2 = draw_pos(d_m2);
                 const double K  = draw_pos(d_K );
                 const double R  = draw_pos(d_R );
                 const double P  = draw_pos(d_P );
-
+                
                 const double q  = mass_ratio_from_inclination(inc_deg, m1, m2);
                 if (q <= 0.0 || !std::isfinite(q)) continue;
-
+                
                 const double vs = (1.0 + 1.0 / q) * K / sin_i;
                 const double rs = 2.0 * M_PI * R /
                                   (P * day_to_sec * vs * km_to_solrad);
-
+                
                 if (vs <= 0.0 || rs <= 0.0 || !std::isfinite(vs) || !std::isfinite(rs))
                     continue;
-
-                S.q .push_back(q );
-                S.vs.push_back(vs);
-                S.rs.push_back(rs);
+                
+                local_incl.push_back(inc_deg);
+                local_q.push_back(q);
+                local_vs.push_back(vs);
+                local_rs.push_back(rs);
+            }
+            
+            #pragma omp critical
+            {
+                all_incl.insert(all_incl.end(), local_incl.begin(), local_incl.end());
+                all_q.insert(all_q.end(), local_q.begin(), local_q.end());
+                all_vs.insert(all_vs.end(), local_vs.begin(), local_vs.end());
+                all_rs.insert(all_rs.end(), local_rs.begin(), local_rs.end());
             }
         }
-
-        /* ---------------- compute global parameter ranges ------------- */
-        std::vector<double> all_q, all_vs, all_rs;
-        for (auto &s : strips) {
-            all_q .insert(all_q .end(), s.q .begin(), s.q .end());
-            all_vs.insert(all_vs.end(), s.vs.begin(), s.vs.end());
-            all_rs.insert(all_rs.end(), s.rs.begin(), s.rs.end());
-        }
+        
         if (all_q.empty()) throw std::runtime_error("No valid MC samples.");
 
-        const auto percent = [](std::vector<double> &v, double f)
+        /* ---------------- compute global parameter ranges ------------- */
+        const auto percent = [](std::vector<double> v, double f)  // Note: pass by value for sorting
         {
             const std::size_t k = std::size_t(f * (v.size() - 1));
             std::nth_element(v.begin(), v.begin() + k, v.end());
@@ -256,6 +262,7 @@ public:
         std::vector<std::vector<double>> Hq (n_incl, std::vector<double>(n_q , 0.0));
         std::vector<std::vector<double>> Hvs(n_incl, std::vector<double>(n_vs, 0.0));
         std::vector<std::vector<double>> Hrs(n_incl, std::vector<double>(n_rs, 0.0));
+        incl_weights.resize(n_incl, 0.0);
 
         auto bin_index = [](double x, double x0, double dx, int nx) -> int
         {
@@ -263,52 +270,80 @@ public:
             return (idx < 0 || idx >= nx) ? -1 : idx;
         };
 
-        for (int i = 0; i < n_incl; ++i)
+        // Fill histograms with continuously sampled data
+        for (size_t s = 0; s < all_incl.size(); ++s)
         {
-            const auto &S = strips[i];
-            for (double v : S.q) {
-                int k = bin_index(v, q_min, q_dx, n_q);
-                if (k >= 0) Hq[i][k] += 1.0;
-            }
-            for (double v : S.vs) {
-                int k = bin_index(v, vs_min, vs_dx, n_vs);
-                if (k >= 0) Hvs[i][k] += 1.0;
-            }
-            for (double v : S.rs) {
-                int k = bin_index(v, rs_min, rs_dx, n_rs);
-                if (k >= 0) Hrs[i][k] += 1.0;
-            }
+            int i_idx = bin_index(all_incl[s], incl_min, incl_dx, n_incl);
+            if (i_idx < 0) continue;
+            
+            // Track how many samples go into each inclination bin
+            incl_weights[i_idx] += 1.0;
+            
+            int q_idx = bin_index(all_q[s], q_min, q_dx, n_q);
+            if (q_idx >= 0) Hq[i_idx][q_idx] += 1.0;
+            
+            int vs_idx = bin_index(all_vs[s], vs_min, vs_dx, n_vs);
+            if (vs_idx >= 0) Hvs[i_idx][vs_idx] += 1.0;
+            
+            int rs_idx = bin_index(all_rs[s], rs_min, rs_dx, n_rs);
+            if (rs_idx >= 0) Hrs[i_idx][rs_idx] += 1.0;
         }
 
+        /* --------- Normalize to get proper conditional PDFs ---------- */
+        pdf_q  = Hq;  
+        pdf_vs = Hvs; 
+        pdf_rs = Hrs;
 
-        /* --------- row-wise normalisation:  ∑ p(x|i) Δx = 1 ---------- */
-        pdf_q  = Hq;  pdf_vs = Hvs; pdf_rs = Hrs;
-
-        const auto norm_rows = [&](auto &M, double dx)
+        // Normalize each row to get p(param|i), but weight by sample count
+        for (int ix = 0; ix < n_incl; ++ix)
         {
-            #pragma omp parallel for schedule(static)
-            for (int ix = 0; ix < n_incl; ++ix)
-            {
-                double row_sum = std::accumulate(M[ix].begin(), M[ix].end(), 0.0);
-                if (row_sum <= 0.0) {
-                    for (double &v : M[ix]) v = 1e-12;
-                    continue;
-                }
-                const double norm = row_sum * dx;
-                for (double &v : M[ix]) v = std::max(v / norm, 1e-12);
+            double weight = incl_weights[ix];
+            if (weight < 1.0) weight = 1.0;  // Avoid division by zero
+            
+            // Normalize q
+            double q_sum = std::accumulate(pdf_q[ix].begin(), pdf_q[ix].end(), 0.0);
+            if (q_sum > 0) {
+                for (double &v : pdf_q[ix]) v /= (q_sum * q_dx);
+            } else {
+                // If no samples, use uniform distribution
+                double uniform_val = 1.0 / (q_max - q_min);
+                for (double &v : pdf_q[ix]) v = uniform_val;
             }
-        };
-
-        norm_rows(pdf_q , q_dx );
-        norm_rows(pdf_vs, vs_dx);
-        norm_rows(pdf_rs, rs_dx);
+            
+            // Normalize vs
+            double vs_sum = std::accumulate(pdf_vs[ix].begin(), pdf_vs[ix].end(), 0.0);
+            if (vs_sum > 0) {
+                for (double &v : pdf_vs[ix]) v /= (vs_sum * vs_dx);
+            } else {
+                double uniform_val = 1.0 / (vs_max - vs_min);
+                for (double &v : pdf_vs[ix]) v = uniform_val;
+            }
+            
+            // Normalize rs
+            double rs_sum = std::accumulate(pdf_rs[ix].begin(), pdf_rs[ix].end(), 0.0);
+            if (rs_sum > 0) {
+                for (double &v : pdf_rs[ix]) v /= (rs_sum * rs_dx);
+            } else {
+                double uniform_val = 1.0 / (rs_max - rs_min);
+                for (double &v : pdf_rs[ix]) v = uniform_val;
+            }
+            
+            // Scale by the relative weight (sample count) for this inclination
+            // This preserves the fact that some inclinations produce more/fewer valid samples
+            double total_weight = std::accumulate(incl_weights.begin(), incl_weights.end(), 0.0);
+            double relative_weight = weight * n_incl / total_weight;
+            
+            for (double &v : pdf_q[ix])  v *= relative_weight;
+            for (double &v : pdf_vs[ix]) v *= relative_weight;
+            for (double &v : pdf_rs[ix]) v *= relative_weight;
+        }
     }
 
-    /* ─────────── bilinear interpolation helper ─────────── */
+    /* ─────────── bilinear interpolation helper (unchanged) ─────────── */
     template<typename Grid>
     inline double interp(const Grid &G,
                          double i_deg, double x,
-                         double x0,  double dx,  int nx)      const
+                         double x0,  double dx,  int nx) const
     {
         if (i_deg < incl_min || i_deg > incl_max ||
             x      < x0       || x      > x0 + dx * (nx - 1))
@@ -334,13 +369,15 @@ public:
         return std::max(v, 1e-12);
     }
 
-    /* ─────────── public evaluators ─────────── */
+    /* ─────────── public evaluators (unchanged) ─────────── */
     double pdf_q_i (double i, double q ) const { return interp(pdf_q , i, q , q_min , q_dx , n_q ); }
     double pdf_vs_i(double i, double vs) const { return interp(pdf_vs, i, vs, vs_min, vs_dx, n_vs); }
     double pdf_rs_i(double i, double rs) const { return interp(pdf_rs, i, rs, rs_min, rs_dx, n_rs); }
 
     double log_combined(double i, double q, double vs, double rs) const
     {
+        // Since p(i) is uniform, it's constant and cancels in the MCMC acceptance ratio
+        // So we just return the conditional probabilities
         return std::log(pdf_q_i(i,q)) + std::log(pdf_vs_i(i,vs))
                                      + std::log(pdf_rs_i(i,rs));
     }

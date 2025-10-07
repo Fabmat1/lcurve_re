@@ -362,7 +362,14 @@ int main(int argc, char* argv[]) {
         Subs::Array1D<double> prop = current_pars;
         for (int i = 0; i < npar; ++i) {
             double proposal = current_pars[i] + dsteps[i] * gauss(rng);
-            proposal = max(limits[i].first, min(limits[i].second, proposal));
+            
+            // Reflect off boundaries until in range
+            while (proposal < limits[i].first || proposal > limits[i].second) {
+                if (proposal < limits[i].first) 
+                    proposal = 2*limits[i].first - proposal;
+                else if (proposal > limits[i].second)
+                    proposal = 2*limits[i].second - proposal;
+            }
             prop[i] = proposal;
         }
         model.set_param(prop);

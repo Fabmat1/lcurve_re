@@ -6,17 +6,31 @@ set(CMAKE_CXX_STANDARD 20)
 cmake_policy(SET CMP0146 NEW)  # Use modern CUDA support
 cmake_policy(SET CMP0167 NEW)  # Use modern Boost support
 
-# Check for CUDA using the modern approach
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-    add_definitions(-DHAVE_CUDA)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -arch=sm_70")
-    set(CUDA_FOUND TRUE)
-    
-    # Find CUDA toolkit for libraries
-    find_package(CUDAToolkit REQUIRED)
+# ─── OPTIONS ───────────────────────────────────────────────────────
+option(LCURVE_ENABLE_CUDA     "Enable CUDA support if available"  ON)
+option(LCURVE_STRICT          "Fail the build on any warning"  OFF)
+option(LCURVE_ENABLE_ASAN     "Build with address/UB sanitiser" OFF)
+
+# Check for CUDA using the modern approach (only if enabled)
+if(LCURVE_ENABLE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        add_definitions(-DHAVE_CUDA)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -arch=sm_70")
+        set(CUDA_FOUND TRUE)
+        
+        # Find CUDA toolkit for libraries
+        find_package(CUDAToolkit REQUIRED)
+        message(STATUS "CUDA support enabled")
+    else()
+        message(STATUS "CUDA compiler not found, building without CUDA support")
+        set(CUDA_FOUND FALSE)
+    endif()
+else()
+    message(STATUS "CUDA support explicitly disabled")
+    set(CUDA_FOUND FALSE)
 endif()
 
 # --- Find gnuplot-iostream header (header-only) ---
@@ -102,7 +116,7 @@ find_package(OpenMP REQUIRED)          # looks for the compiler's OpenMP support
 target_link_libraries(utilities PRIVATE OpenMP::OpenMP_CXX)
 
 # Link CUDA runtime if found
-if(CMAKE_CUDA_COMPILER)
+if(CUDA_FOUND)
     target_link_libraries(utilities PRIVATE CUDA::cudart)
     set_property(TARGET utilities PROPERTY CUDA_ARCHITECTURES 70)
 endif()
@@ -149,10 +163,6 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "/usr/local" CACHE PATH "Default install prefix" FORCE)
 endif()
 
-# ─── OPTIONS ───────────────────────────────────────────────────────
-option(LCURVE_STRICT          "Fail the build on any warning"  OFF)
-option(LCURVE_ENABLE_ASAN     "Build with address/UB sanitiser" OFF)
-
 # ─── BUILD TYPE DEFAULT ───────────────────────────────────────────
 # Only set a default when the user has not supplied -DCMAKE_BUILD_TYPE
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -178,7 +188,7 @@ endif()
 
 # ─── SANITISER FLAGS (only meaningful for Clang/GCC & no CUDA) ───
 set(_SAN_FLAGS "")
-if(LCURVE_ENABLE_ASAN AND NOT CMAKE_CUDA_COMPILER
+if(LCURVE_ENABLE_ASAN AND NOT CUDA_FOUND
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     list(APPEND _SAN_FLAGS -fsanitize=address,undefined
                            -fno-omit-frame-pointer)
