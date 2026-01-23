@@ -1,5 +1,6 @@
 #include "lcurve.h"
 #include "constants.h"
+#include <iostream>
 
 /** This routine computes the light curve corresponding to a particular
  * model and times defined by some data. Data with negative or zero errors
@@ -360,7 +361,7 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
             }
         }
     }
-
+    
     // calculate flux-weighted loggs and volume-averaged radii
     logg1 = comp_gravity1(mdl, star1f);
     logg2 = comp_gravity2(mdl, star2f);

@@ -12,6 +12,7 @@
 #include "../src/new_helpers.h"
 #include "../src/new_subs.h"
 #include "../src/mass_ratio_pdf.h"
+#include "../src/grid_cache.h"
 #include <cmath>
 #include <sys/ioctl.h>   // TIOCGWINSZ
 #include <unistd.h>      // STDOUT_FILENO
@@ -106,6 +107,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < npar; ++i) names[i] = model.get_name(i);
     Subs::Array1D<double> current_pars = model.get_param();
     Subs::Array1D<double> dsteps      = model.get_dstep();
+    Subs::Array1D<double> ranges      = model.get_range();
     vector<pair<double, double>> limits = model.get_limit();
     string device = config.value("plot_device", "none");
 
@@ -126,7 +128,22 @@ int main(int argc, char* argv[]) {
     int nsteps            = config.value("mcmc_steps", 25000);
     int burn_in           = config.value("mcmc_burn_in", nsteps/4);
     int progress_interval = config.value("progress_interval", 50);
+    int max_model_points  = config.value("max_model_points", 500);
 
+    // Determine if we should use grid caching
+    long total_evaluations = nsteps;
+    bool use_grid_cache = (total_evaluations > 100000) && (npar <= 6);
+    
+    double grid_threshold = 0.5;  // Use cached value if within half a grid spacing
+    
+    std::unique_ptr<GridCache> grid_cache;
+    if (use_grid_cache) {
+        cout << "Using optimized grid cache for " << npar << " parameters" << endl;
+        vector<double> steps_vec(ranges.begin(), ranges.end());
+        vector<double> initial_vec(current_pars.begin(), current_pars.end());
+        grid_cache = std::make_unique<GridCache>(npar, initial_vec, steps_vec, limits, 50000);
+    }
+    
     // ANSI color codes
     const string RESET = "\033[0m";
     const string BRIGHT_GREEN = "\033[92m";
@@ -147,13 +164,14 @@ int main(int argc, char* argv[]) {
     mt19937 rng(seed);
     normal_distribution<> gauss(0.0, 1.0);
     uniform_real_distribution<> uni(0.0, 1.0);
-
+    
     // Initial chi-squared
     vector<double> fit;
     double wd0, chisq0, wn0, lg10, lg20, rv10, rv20;
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20);
+    
     double current_chisq = chisq0;
     double best_chisq    = chisq0;
     Subs::Array1D<double> best_pars = current_pars;
@@ -217,7 +235,7 @@ int main(int argc, char* argv[]) {
         double R_err = get<1>(r1_prior);
         initialize_mass_ratio_pdf_grid(m1_mean, m1_err, m2_mean, m2_err,
                                        K_mean, K_err, R_mean, R_err, 
-                                       config.value("true_period", 1.0), 0.0);
+                                       config.value("true_period", 1.0), 0.0000001);
 
         // Calculate initial log prior
         double init_incl = model.iangle.vary && iangle_idx >= 0 ? current_pars[iangle_idx] : model.iangle.value;
@@ -405,19 +423,93 @@ int main(int argc, char* argv[]) {
         // Evaluate
         vector<double> fitp;
         double wdp, chp, wnp, lg1p, lg2p, rv1p, rv2p;
-        try {
-            light_curve_comp(model, data, scale, !no_file, false, sfac,
-                           fitp, wdp, chp, wnp,
-                           lg1p, lg2p, rv1p, rv2p);
-        }
-        catch (Lcurve::Lcurve_Error &e) {
-            model.set_param(current_pars);
-            if (step >= burn_in) {
-                chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
+        bool computed_model = false;
+        
+        if (use_grid_cache) {
+            // Check if we can use a cached value
+            vector<double> prop_vec(prop.begin(), prop.end());
+            auto grid_idx = grid_cache->param_to_grid_index(prop_vec);
+            auto grid_params = grid_cache->grid_index_to_param(grid_idx);
+            
+            GridCache::CachedModel cached_model;
+            
+            // If we're very close to a grid point, use it directly
+            if (grid_cache->is_close_to_grid_point(prop_vec, grid_threshold) && 
+                grid_cache->get_cached_model(grid_idx, cached_model)) {
+                // Use cached value directly
+                chp = cached_model.chisq;
+                fitp = cached_model.model_values;
+                computed_model = false;
+            } else {
+                // Need to compute - but first check if this exact grid point is cached
+                if (!grid_cache->has_node(grid_idx)) {
+                    // Compute at grid point and cache it
+                    Subs::Array1D<double> grid_array(npar);
+                    for (int i = 0; i < npar; ++i) {
+                        grid_array[i] = grid_params[i];
+                    }
+                    model.set_param(grid_array);
+                    
+                    try {
+                        vector<double> grid_fit;
+                        double grid_chisq;
+                        light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
+                                            grid_fit, wdp, grid_chisq, wnp,
+                                            lg1p, lg2p, rv1p, rv2p, max_model_points);
+                        
+                        GridCache::CachedModel new_model;
+                        new_model.model_values = grid_fit;
+                        new_model.chisq = grid_chisq;
+                        grid_cache->add_model(grid_idx, new_model);
+                    } catch (Lcurve::Lcurve_Error &e) {
+                        // Bad parameters at grid point
+                        GridCache::CachedModel bad_model;
+                        bad_model.chisq = 1e10;
+                        grid_cache->add_model(grid_idx, bad_model);
+                    }
+                }
+                
+                // Now compute at actual proposed point
+                model.set_param(prop);
+                try {
+                    light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
+                                        fitp, wdp, chp, wnp,
+                                        lg1p, lg2p, rv1p, rv2p, max_model_points);
+                    computed_model = true;
+                } catch (Lcurve::Lcurve_Error &e) {
+                    model.set_param(current_pars);
+                    if (step >= burn_in) {
+                        chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
+                    }
+                    continue;
+                }
             }
-            continue;
-        }
 
+            
+        } else {
+            // Standard evaluation without caching
+            try {
+                light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
+                                     fitp, wdp, chp, wnp,
+                                     lg1p, lg2p, rv1p, rv2p, max_model_points);
+                computed_model = true;
+            }
+            catch (Lcurve::Lcurve_Error &e) {
+                model.set_param(current_pars);
+                if (step >= burn_in) {
+                    chain[step-burn_in] = ChainEntry{step-burn_in, current_pars, current_chisq};
+                }
+                continue;
+            }
+        }
+        
+        // For visualization, ensure we have the model
+        if (step % progress_interval == 0 && !computed_model) {
+            model.set_param(prop);
+            light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
+                                fitp, wdp, chp, wnp,
+                                lg1p, lg2p, rv1p, rv2p, max_model_points);
+        }
 
         // Accept/reject
        bool this_accept = false;

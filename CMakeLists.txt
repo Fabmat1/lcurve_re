@@ -108,6 +108,8 @@ set(SOURCES
         src/amoeba.cpp
         src/mass_ratio_pdf.cpp
         src/mass_ratio_pdf.h
+        src/lcurve_base/light_curve_comp_fast.cpp
+        src/grid_cache.h
 )
 
 add_library(utilities STATIC ${SOURCES})

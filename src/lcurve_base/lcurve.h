@@ -406,6 +406,15 @@ namespace Lcurve {
         void rasc(const string &file);
     };
 
+    void light_curve_comp_fast(const Lcurve::Model &mdl,
+                               const Lcurve::Data &data, bool scale,
+                               bool rdata, bool info,
+                               std::vector<double> &sfac,
+                               std::vector<double> &calc, double &wdwarf,
+                               double &chisq, double &wnok,
+                               double &logg1, double &logg2, 
+                               double &rv1, double &rv2,
+                               int max_model_points = 500);
 
     //! Function object to compute chi**2
 

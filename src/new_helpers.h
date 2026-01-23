@@ -338,13 +338,14 @@ namespace Helpers {
         scale = (!no_file && config["autoscale"].get<bool>());
 
         // Initialize the scale factors (sfac)
-        sfac.resize(4);
+        sfac.resize(5);
         if (!scale) {
             if (model.iscale) {
                 sfac[0] = config["sstar1"].get<double>();
                 sfac[1] = config["sstar2"].get<double>();
                 sfac[2] = config["sdisc"].get<double>();
                 sfac[3] = config["sspot"].get<double>();
+                sfac[4] = 0;
             } else {
                 sfac[0] = config["ssfac"].get<double>();
             }
