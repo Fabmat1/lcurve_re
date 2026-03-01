@@ -589,9 +589,9 @@ int main() {
     std::cout << "Running MCMC with log_combined() as the sole acceptance criterion..." << std::endl;
     
     // MCMC parameters
-    const int n_mcmc_steps = 10000000;
-    const int burn_in = 100000;
-    const int thin = 2;  // Keep every 2nd sample to reduce correlation
+    const int n_mcmc_steps = 1000000;
+    const int burn_in = 10000;
+    const int thin = 1;  // Keep every 2nd sample to reduce correlation
     
     // Initialize random number generator
     std::mt19937 rng(42);  // Fixed seed for reproducibility
