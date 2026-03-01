@@ -32,30 +32,34 @@ def format_with_error(med, lo, hi):
     err_lo = fmt.format(med - lo)
     return med_str, f"+{err_hi}/-{err_lo}"
 
+_sync_updating = False
+
 def sync_y_to_x(ax_src, ax_dst):
     def on_ylim_change(event_ax):
-        if getattr(ax_dst, '_updating', False):
+        global _sync_updating
+        if _sync_updating:
             return
-        ax_dst._updating = True
+        _sync_updating = True
         try:
             ylim = ax_src.get_ylim()
             ax_dst.set_xlim(ylim)
             ax_dst.figure.canvas.draw_idle()
         finally:
-            ax_dst._updating = False
+            _sync_updating = False
     return on_ylim_change
 
 def sync_x_to_y(ax_src, ax_dst):
     def on_xlim_change(event_ax):
-        if getattr(ax_dst, '_updating', False):
+        global _sync_updating
+        if _sync_updating:
             return
-        ax_dst._updating = True
+        _sync_updating = True
         try:
             xlim = ax_src.get_xlim()
             ax_dst.set_ylim(xlim)
             ax_dst.figure.canvas.draw_idle()
         finally:
-            ax_dst._updating = False
+            _sync_updating = False
     return on_xlim_change
 
 def get_quantile_bounds(values, weights, quantile=0.995, margin=0.05):

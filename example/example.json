@@ -30,6 +30,9 @@
   "adapt_min_stepscale": 1e-4,
   "adapt_max_stepscale": 1e4,
   "adapt_fraction": 0.75,
+  "adapt_covariance": true,
+  "cov_warmup": 500,
+  "cov_epsilon": 1e-6
   "priors": {
     "vrad1_obs": "130 50 20",
     "m1": "0.44 0.05 0.05",
