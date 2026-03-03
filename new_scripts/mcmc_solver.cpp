@@ -11,6 +11,7 @@
 //  • Effective-sample-size (ESS) reporting
 //  • Chain thinning for file output
 //  • log-prior stored in chain for diagnostics
+//  • Extended priors: K2, M2, R2, q, M_total, logg1, logg2, T1, T2
 // ═══════════════════════════════════════════════════════════════════════
 
 #include <iostream>
@@ -160,11 +161,15 @@ int main(int argc, char* argv[])
 
     // ── Identify parameter indices for the prior ─────────────────────
     int q_idx = -1, vs_idx = -1, r1_idx = -1, iangle_idx = -1;
+    int r2_idx = -1, t1_idx = -1, t2_idx = -1;
     for (int i = 0; i < npar; ++i) {
         if      (names[i] == "q")              q_idx      = i;
         else if (names[i] == "velocity_scale") vs_idx     = i;
         else if (names[i] == "r1")             r1_idx     = i;
         else if (names[i] == "iangle")         iangle_idx = i;
+        else if (names[i] == "r2")             r2_idx     = i;
+        else if (names[i] == "t1")             t1_idx     = i;
+        else if (names[i] == "t2")             t2_idx     = i;
     }
 
     cout << "Calculating MCMC for " << npar << " parameters:" << endl;
@@ -182,6 +187,20 @@ int main(int argc, char* argv[])
     int thin              = max(1, config.value("mcmc_thin", 1));
     int progress_interval = config.value("progress_interval", 50);
     int max_model_points  = config.value("max_model_points",  500);
+
+    // ─────────────────────────────────────────────────────────────────
+    //  Simulated annealing during burn-in
+    //
+    //  During the first anneal_steps, the chi² is divided by a
+    //  temperature T that starts at anneal_T0 and linearly cools
+    //  to 1.0.  This lets the chain explore broadly before settling.
+    //  The prior is always evaluated at T=1 (never annealed).
+    // ─────────────────────────────────────────────────────────────────
+    bool   anneal_enabled = config.value("anneal_enabled", true);
+    double anneal_T0      = config.value("anneal_T0",      10.0);
+    int    anneal_steps   = config.value("anneal_steps",    burn_in / 2);
+    if (anneal_steps < 0) anneal_steps = 0;
+
 
     // ANSI colours
     const string RESET        = "\033[0m";
@@ -217,23 +236,15 @@ int main(int argc, char* argv[])
 
     // ─────────────────────────────────────────────────────────────────
     //  Covariance adaptation  (Adaptive Metropolis, Haario+ 2001)
-    //
-    //  NEW: the Welford accumulator is RESET at `cov_reset_step`
-    //  so that early burn-in transient does not corrupt the estimate.
-    //  When the Cholesky first (re-)activates, the global scale
-    //  factor is reset to 1 so the (2.38²/d)·Σ scaling is correct.
     // ─────────────────────────────────────────────────────────────────
     bool   adapt_covariance = config.value("adapt_covariance", true);
     int    cov_warmup       = config.value("cov_warmup",
-                                  max(20 * npar, 500));
+                                    max(50 * npar, 1000));
     double cov_epsilon      = config.value("cov_epsilon", 1e-6);
     double cov_sd           = 2.38 / std::sqrt(static_cast<double>(npar));
 
-    // After reset, require fewer samples to re-activate Cholesky
-    // (the chain should already be near the mode)
-    int cov_min_after_reset = max(2 * npar + 2, 50);
+    int cov_min_after_reset = max(10 * npar, 200);
 
-    // Auto-compute reset step: 40 % of burn-in.  Set to 0 to disable.
     int cov_reset_step = config.value("cov_reset_step", -1);
     if (cov_reset_step < 0) cov_reset_step = burn_in * 2 / 5;
 
@@ -304,15 +315,31 @@ int main(int argc, char* argv[])
     };
 
     // ─────────────────────────────────────────────────────────────────
-    //  Physical priors  (replaces mass_ratio_pdf grid)
+    //  Helper: read current or fixed model parameter value
+    // ─────────────────────────────────────────────────────────────────
+    auto get_par = [&](int idx, double fixed_val,
+                       const Subs::Array1D<double>& pars) -> double {
+        return (idx >= 0) ? pars[idx] : fixed_val;
+    };
+
+    // ─────────────────────────────────────────────────────────────────
+    //  Physical priors
     // ─────────────────────────────────────────────────────────────────
     ObservedConstraints obs;
     bool use_priors = config.value("use_priors", false);
     double log_prior_current = 0.0;
 
+    if (anneal_enabled && use_priors)
+    {
+        cout << BRIGHT_CYAN << "Annealing: T0 = " << anneal_T0
+             << " → 1.0 over " << anneal_steps << " steps"
+             << RESET << endl;
+    }
+
     if (use_priors) {
-        obs.P_days         = config.value("true_period", 1.0);
+        obs.P_days          = config.value("true_period", 1.0);
         obs.use_sin_i_prior = config.value("use_sin_i_prior", true);
+        obs.prior_weight    = config.value("prior_weight", 1.0);
 
         for (auto& [p, v] : config["priors"].items()) {
             auto [val, err_lo, err_hi] =
@@ -320,19 +347,58 @@ int main(int argc, char* argv[])
             if (err_hi <= 0.0) err_hi = err_lo;
             if (err_lo <= 0.0) err_lo = err_hi;
 
-            if (p == "vrad1_obs") {
+            // ── Radial velocities ──
+            if (p == "K1" || p == "vrad1_obs") {
                 obs.K_obs = val; obs.K_err_lo = err_lo;
                 obs.K_err_hi = err_hi; obs.has_K = true;
-            } else if (p == "m1") {
+            } else if (p == "K2") {
+                obs.K2_obs = val; obs.K2_err_lo = err_lo;
+                obs.K2_err_hi = err_hi; obs.has_K2 = true;
+            }
+            // ── Masses ──
+            else if (p == "M1" || p == "m1") {
                 obs.M1_obs = val; obs.M1_err_lo = err_lo;
                 obs.M1_err_hi = err_hi; obs.has_M1 = true;
-            } else if (p == "m2_min") {
+            } else if (p == "M2") {
+                obs.M2_obs = val; obs.M2_err_lo = err_lo;
+                obs.M2_err_hi = err_hi; obs.has_M2 = true;
+            } else if (p == "M2_min" || p == "m2_min") {
                 obs.M2min_obs = val; obs.M2min_err_lo = err_lo;
                 obs.M2min_err_hi = err_hi; obs.has_M2min = true;
-            } else if (p == "r1") {
+            } else if (p == "M_total") {
+                obs.Mtotal_obs = val; obs.Mtotal_err_lo = err_lo;
+                obs.Mtotal_err_hi = err_hi; obs.has_Mtotal = true;
+            }
+            // ── Mass ratio ──
+            else if (p == "q") {
+                obs.q_obs = val; obs.q_err_lo = err_lo;
+                obs.q_err_hi = err_hi; obs.has_q = true;
+            }
+            // ── Radii ──
+            else if (p == "R1" || p == "r1") {
                 obs.R1_obs = val; obs.R1_err_lo = err_lo;
                 obs.R1_err_hi = err_hi; obs.has_R1 = true;
-            } else {
+            } else if (p == "R2") {
+                obs.R2_obs = val; obs.R2_err_lo = err_lo;
+                obs.R2_err_hi = err_hi; obs.has_R2 = true;
+            }
+            // ── Surface gravities ──
+            else if (p == "logg1") {
+                obs.logg1_obs = val; obs.logg1_err_lo = err_lo;
+                obs.logg1_err_hi = err_hi; obs.has_logg1 = true;
+            } else if (p == "logg2") {
+                obs.logg2_obs = val; obs.logg2_err_lo = err_lo;
+                obs.logg2_err_hi = err_hi; obs.has_logg2 = true;
+            }
+            // ── Effective temperatures ──
+            else if (p == "T1") {
+                obs.T1_obs = val; obs.T1_err_lo = err_lo;
+                obs.T1_err_hi = err_hi; obs.has_T1 = true;
+            } else if (p == "T2") {
+                obs.T2_obs = val; obs.T2_err_lo = err_lo;
+                obs.T2_err_hi = err_hi; obs.has_T2 = true;
+            }
+            else {
                 cerr << "Unknown prior: " << p << endl;
                 return 1;
             }
@@ -344,18 +410,50 @@ int main(int argc, char* argv[])
         if (obs.has_K)
             cout << "  K1     = " << obs.K_obs << " ± "
                  << obs.K_err_lo << "/" << obs.K_err_hi << " km/s\n";
+        if (obs.has_K2)
+            cout << "  K2     = " << obs.K2_obs << " ± "
+                 << obs.K2_err_lo << "/" << obs.K2_err_hi << " km/s\n";
         if (obs.has_M1)
             cout << "  M1     = " << obs.M1_obs << " ± "
                  << obs.M1_err_lo << "/" << obs.M1_err_hi << " M_sun\n";
+        if (obs.has_M2)
+            cout << "  M2     = " << obs.M2_obs << " ± "
+                 << obs.M2_err_lo << "/" << obs.M2_err_hi << " M_sun\n";
         if (obs.has_M2min)
             cout << "  M2_min = " << obs.M2min_obs << " ± "
                  << obs.M2min_err_lo << "/" << obs.M2min_err_hi
                  << " M_sun (one-sided)\n";
+        if (obs.has_Mtotal)
+            cout << "  M_tot  = " << obs.Mtotal_obs << " ± "
+                 << obs.Mtotal_err_lo << "/" << obs.Mtotal_err_hi
+                 << " M_sun\n";
+        if (obs.has_q)
+            cout << "  q      = " << obs.q_obs << " ± "
+                 << obs.q_err_lo << "/" << obs.q_err_hi << "\n";
         if (obs.has_R1)
             cout << "  R1     = " << obs.R1_obs << " ± "
                  << obs.R1_err_lo << "/" << obs.R1_err_hi << " R_sun\n";
+        if (obs.has_R2)
+            cout << "  R2     = " << obs.R2_obs << " ± "
+                 << obs.R2_err_lo << "/" << obs.R2_err_hi << " R_sun\n";
+        if (obs.has_logg1)
+            cout << "  logg1  = " << obs.logg1_obs << " ± "
+                 << obs.logg1_err_lo << "/" << obs.logg1_err_hi << " dex\n";
+        if (obs.has_logg2)
+            cout << "  logg2  = " << obs.logg2_obs << " ± "
+                 << obs.logg2_err_lo << "/" << obs.logg2_err_hi << " dex\n";
+        if (obs.has_T1)
+            cout << "  T1     = " << obs.T1_obs << " ± "
+                 << obs.T1_err_lo << "/" << obs.T1_err_hi << " K\n";
+        if (obs.has_T2)
+            cout << "  T2     = " << obs.T2_obs << " ± "
+                 << obs.T2_err_lo << "/" << obs.T2_err_hi << " K\n";
         if (obs.use_sin_i_prior)
             cout << "  p(i) ~ sin(i)  (geometric prior)\n";
+
+        if (obs.prior_weight != 1.0)
+            cout << "  Prior weight = " << obs.prior_weight
+                    << "x (observational terms scaled)" << endl;
 
         // ── Warn about fixed parameters ──
         auto warn_fixed = [&](const string& pname, bool varied) {
@@ -368,22 +466,29 @@ int main(int argc, char* argv[])
         warn_fixed("velocity_scale", vs_idx >= 0);
         warn_fixed("r1",             r1_idx >= 0);
         warn_fixed("iangle",         iangle_idx >= 0);
+        if (obs.has_R2 || obs.has_logg2)
+            warn_fixed("r2", r2_idx >= 0);
+        if (obs.has_T1)
+            warn_fixed("t1", t1_idx >= 0);
+        if (obs.has_T2)
+            warn_fixed("t2", t2_idx >= 0);
 
         // ── Evaluate & print initial prior ──
-        double init_i  = (iangle_idx >= 0) ? current_pars[iangle_idx]
-                                           : model.iangle.value;
-        double init_q  = (q_idx >= 0)      ? current_pars[q_idx]
-                                           : model.q.value;
-        double init_vs = (vs_idx >= 0)     ? current_pars[vs_idx]
-                                           : model.velocity_scale.value;
-        double init_r1 = (r1_idx >= 0)     ? current_pars[r1_idx]
-                                           : model.r1.value;
+        double init_i  = get_par(iangle_idx, model.iangle.value, current_pars);
+        double init_q  = get_par(q_idx,      model.q.value,      current_pars);
+        double init_vs = get_par(vs_idx,     model.velocity_scale.value, current_pars);
+        double init_r1 = get_par(r1_idx,     model.r1.value,     current_pars);
+        double init_r2 = get_par(r2_idx,     model.r2.value,     current_pars);
+        double init_t1 = get_par(t1_idx,     model.t1.value,     current_pars);
+        double init_t2 = get_par(t2_idx,     model.t2.value,     current_pars);
 
         log_prior_current = PhysicalPrior::compute(
-                                init_i, init_q, init_vs, init_r1, obs);
+                                init_i, init_q, init_vs, init_r1,
+                                init_r2, init_t1, init_t2, obs);
 
         cout << BRIGHT_CYAN << "Initial implied quantities:" << RESET << endl;
-        PhysicalPrior::print_implied(init_i, init_q, init_vs, init_r1, obs);
+        PhysicalPrior::print_implied(init_i, init_q, init_vs, init_r1,
+                                     init_r2, init_t1, init_t2, obs);
         cout << "  log-prior = " << log_prior_current << endl;
 
         if (log_prior_current < -50.0) {
@@ -395,6 +500,110 @@ int main(int argc, char* argv[])
                     "  with the observational constraints."
                  << RESET << endl;
         }
+    }
+
+    // ── Auto-adjust starting parameters to be physically consistent ──
+    //
+    //  The previous version triggered re-initialisation when
+    //  K1_max(i=90) < K_obs.  With large asymmetric error bars the
+    //  central K_obs can exceed K1_max while the implied K1 is still
+    //  well within the credible interval.
+    //
+    //  New logic: only trigger if the current implied K1 is more than
+    //  3σ away from the observed value (using the appropriate
+    //  asymmetric error bar).
+    // ─────────────────────────────────────────────────────────────────
+    bool auto_init = config.value("auto_consistent_init", true);
+    if (use_priors && auto_init && obs.has_K && obs.has_M1 && obs.has_R1)
+    {
+        double init_i  = get_par(iangle_idx, model.iangle.value, current_pars);
+        double init_q  = get_par(q_idx,      model.q.value,      current_pars);
+        double init_vs = get_par(vs_idx,     model.velocity_scale.value, current_pars);
+        double init_r1 = get_par(r1_idx,     model.r1.value,     current_pars);
+
+        double sin_i_init  = std::sin(init_i * PhysicalPrior::DEG2RAD);
+        double K_implied   = init_vs * sin_i_init * init_q / (1.0 + init_q);
+
+        // Compute the pull (signed distance in σ units)
+        double K_sigma = (K_implied < obs.K_obs) ? obs.K_err_lo : obs.K_err_hi;
+        if (K_sigma <= 0.0) K_sigma = std::max(obs.K_err_lo, obs.K_err_hi);
+        if (K_sigma <= 0.0) K_sigma = 0.1 * obs.K_obs;   // fallback
+
+        double K_pull = (K_implied - obs.K_obs) / K_sigma;
+        bool need_reinit = std::abs(K_pull) > 3.0;
+
+        if (need_reinit) {
+            cout << BRIGHT_YELLOW
+                 << "\n  Starting K1 = " << K_implied
+                 << " is " << std::abs(K_pull) << "σ from K_obs = "
+                 << obs.K_obs << " (−" << obs.K_err_lo
+                 << "/+" << obs.K_err_hi << ")"
+                 << "\n  Computing consistent starting parameters..."
+                 << RESET << endl;
+
+            double q_new, vs_new, r1_new;
+            bool ok = PhysicalPrior::solve_consistent_params(
+                          init_i, obs.K_obs, obs.M1_obs, obs.R1_obs,
+                          obs.P_days, q_new, vs_new, r1_new);
+
+            if (!ok) {
+                for (double try_i = 85.0; try_i >= 30.0; try_i -= 5.0) {
+                    ok = PhysicalPrior::solve_consistent_params(
+                             try_i, obs.K_obs, obs.M1_obs, obs.R1_obs,
+                             obs.P_days, q_new, vs_new, r1_new);
+                    if (ok) { init_i = try_i; break; }
+                }
+            }
+
+            if (ok) {
+                cout << BRIGHT_GREEN
+                     << "  Consistent starting point found:"
+                     << RESET << endl;
+                cout << "    i  = " << init_i << " deg" << endl;
+                cout << "    q  = " << q_new  << endl;
+                cout << "    vs = " << vs_new << " km/s" << endl;
+                cout << "    r1 = " << r1_new << endl;
+
+                if (iangle_idx >= 0) current_pars[iangle_idx] = init_i;
+                if (q_idx >= 0)      current_pars[q_idx]      = q_new;
+                if (vs_idx >= 0)     current_pars[vs_idx]     = vs_new;
+                if (r1_idx >= 0)     current_pars[r1_idx]     = r1_new;
+
+                for (int i = 0; i < npar; ++i)
+                    current_pars[i] = std::clamp(current_pars[i],
+                                                 limits[i].first,
+                                                 limits[i].second);
+                model.set_param(current_pars);
+            } else {
+                cout << BRIGHT_RED
+                     << "  Could not find consistent starting point!"
+                     << "\n  Check that your constraints are compatible."
+                     << RESET << endl;
+            }
+        }
+
+        // Re-evaluate prior at (possibly updated) starting point
+        double si = get_par(iangle_idx, model.iangle.value, current_pars);
+        double sq = get_par(q_idx,      model.q.value,      current_pars);
+        double sv = get_par(vs_idx,     model.velocity_scale.value, current_pars);
+        double sr = get_par(r1_idx,     model.r1.value,     current_pars);
+        double sr2= get_par(r2_idx,     model.r2.value,     current_pars);
+        double st1= get_par(t1_idx,     model.t1.value,     current_pars);
+        double st2= get_par(t2_idx,     model.t2.value,     current_pars);
+
+        log_prior_current = PhysicalPrior::compute(
+                                si, sq, sv, sr, sr2, st1, st2, obs);
+
+        cout << BRIGHT_CYAN << "Starting implied quantities:"
+             << RESET << endl;
+        PhysicalPrior::print_implied(si, sq, sv, sr, sr2, st1, st2, obs);
+        cout << "  log-prior = " << log_prior_current << endl;
+
+        if (log_prior_current < -50.0)
+            cout << BRIGHT_RED
+                 << "  [WARNING] log-prior still very negative."
+                    " MCMC may struggle to converge."
+                 << RESET << endl;
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -424,7 +633,7 @@ int main(int argc, char* argv[])
     double current_chisq = chisq0;
     double best_chisq    = chisq0;
     Subs::Array1D<double> best_pars = current_pars;
-    vector<double> current_fit = fit;   // for live plotting
+    vector<double> current_fit = fit;
 
     // ─────────────────────────────────────────────────────────────────
     //  Chain storage
@@ -438,7 +647,7 @@ int main(int argc, char* argv[])
     vector<ChainEntry> chain(nsteps - burn_in);
 
     // ─────────────────────────────────────────────────────────────────
-    //  Adaptation bookkeeping: one call per step
+    //  Adaptation bookkeeping
     // ─────────────────────────────────────────────────────────────────
     auto record_step = [&](bool accepted_step)
     {
@@ -541,9 +750,68 @@ int main(int argc, char* argv[])
                          : BRIGHT_YELLOW + string("Diagonal"))
                      << RESET << endl;
             }
+            
+            // ── Chi² vs prior diagnostic ──
+            if (use_priors) {
+                double bi  = get_par(iangle_idx, model.iangle.value, current_pars);
+                double bq  = get_par(q_idx,      model.q.value,      current_pars);
+                double bv  = get_par(vs_idx,     model.velocity_scale.value, current_pars);
+                double br  = get_par(r1_idx,     model.r1.value,     current_pars);
+                double br2 = get_par(r2_idx,     model.r2.value,     current_pars);
+                double bt1 = get_par(t1_idx,     model.t1.value,     current_pars);
+                double bt2 = get_par(t2_idx,     model.t2.value,     current_pars);
+
+                auto [lp_geom, lp_obs] = PhysicalPrior::compute_decomposed(
+                    bi, bq, bv, br, br2, bt1, bt2, obs);
+
+                cout << BRIGHT_CYAN
+                    << "  Chi² vs prior balance at burn-in end:" << RESET << endl;
+                cout << "    χ²            = " << fixed << setprecision(2)
+                    << current_chisq << "  (-0.5·χ² = "
+                    << (-0.5 * current_chisq) << ")" << endl;
+                cout << "    log-prior     = " << log_prior_current
+                    << "  (geometric: " << lp_geom
+                    << "  observational×" << obs.prior_weight
+                    << ": " << (obs.prior_weight * lp_obs) << ")" << endl;
+                cout << "    log-posterior  = "
+                    << (-0.5 * current_chisq + log_prior_current) << endl;
+
+                double prior_frac = std::abs(log_prior_current)
+                                / (std::abs(-0.5 * current_chisq)
+                                    + std::abs(log_prior_current) + 1e-30);
+
+                if (prior_frac < 0.05) {
+                    cout << BRIGHT_RED
+                        << "    [WARNING] Priors contribute only "
+                        << fixed << setprecision(1) << (prior_frac * 100)
+                        << "% of log-posterior.\n"
+                        << "    The light curve dominates. Consider:\n"
+                        << "    • Increasing prior_weight (currently "
+                        << obs.prior_weight << ")\n"
+                        << "    • Checking if the LC model is appropriate\n"
+                        << "    • Verifying error bars on the data"
+                        << RESET << endl;
+                }
+                if (lp_obs < -10.0) {
+                    cout << BRIGHT_RED
+                        << "    [WARNING] Observational prior penalty = "
+                        << lp_obs << " (unweighted).\n"
+                        << "    Current parameters violate your physical"
+                        << " constraints.\n"
+                        << "    The chain may be stuck in a χ² minimum"
+                        << " inconsistent with\n"
+                        << "    the known physics. Try prior_weight > 1."
+                        << RESET << endl;
+                }
+
+                cout << BRIGHT_CYAN << "  Current implied quantities:"
+                    << RESET << endl;
+                PhysicalPrior::print_implied(bi, bq, bv, br, br2, bt1, bt2, obs);
+            }
             cout << BRIGHT_CYAN
                  << "─────────────────────────────────────────────"
                  << RESET << endl;
+            
         }
 
         // ── Progress display ─────────────────────────────────────────
@@ -569,14 +837,12 @@ int main(int argc, char* argv[])
             double acc_rate = acc_window.empty() ? -1.0
                 : 100.0 * window_accept_count / acc_window.size();
 
-            // ── Build display line ───────────────────────────────────
             ostringstream oss_prefix;
             oss_prefix << "\r" << RESET << "[";
 
             struct Chunk { string txt; int prio; };
             vector<Chunk> chunks;
 
-            // percentage
             { ostringstream t;
               if      (percent >= 90) t << BRIGHT_GREEN;
               else if (percent >= 50) t << BRIGHT_BLUE;
@@ -585,7 +851,6 @@ int main(int argc, char* argv[])
               chunks.push_back({t.str(), 99});
             }
 
-            // acceptance / adaptation
             { ostringstream t;
               if ((adapt_enabled||adapt_covariance) && step < burn_in) {
                   double dr = adapt_window_count > 0
@@ -600,6 +865,12 @@ int main(int argc, char* argv[])
                     << dr << "->" << (adapt_target*100) << "%"
                     << RESET << DIM << " x" << setprecision(2) << dsf;
                   if (cov_ready) t << " Cov";
+                  // Show annealing temperature
+                  if (anneal_enabled && step < anneal_steps) {
+                      double frac = double(step) / anneal_steps;
+                      double T_now = anneal_T0 * (1.0 - frac) + frac;
+                      t << " T=" << setprecision(1) << T_now;
+                  }
                   t << RESET;
               } else if (step < burn_in) {
                   t << DIM << " | Burn-in" << RESET;
@@ -623,13 +894,11 @@ int main(int argc, char* argv[])
               chunks.push_back({t.str(), 30});
             }
 
-            // step counter
             { ostringstream t;
               t << " | " << DIM << step << "/" << nsteps << RESET;
               chunks.push_back({t.str(), 20});
             }
 
-            // ETA
             { ostringstream t;
               t << " | " << BRIGHT_CYAN << "ETA " << eta_txt << RESET;
               chunks.push_back({t.str(), 10});
@@ -680,7 +949,6 @@ int main(int argc, char* argv[])
         const double sf = std::exp(adapt_log_scale);
 
         if (cov_ready) {
-            // Correlated proposal:  prop = current + sf · L · z
             vector<double> z(npar);
             for (int i = 0; i < npar; ++i) z[i] = gauss(rng);
             for (int i = 0; i < npar; ++i) {
@@ -690,12 +958,11 @@ int main(int argc, char* argv[])
                 prop[i] = current_pars[i] + sf * offset;
             }
         } else {
-            // Diagonal proposals with per-parameter steps
             for (int i = 0; i < npar; ++i)
                 prop[i] = current_pars[i] + dsteps[i] * gauss(rng);
         }
 
-        // ── Reflect off boundaries (with bounce cap) ────────────────
+        // ── Reflect off boundaries ──────────────────────────────────
         for (int i = 0; i < npar; ++i) {
             double lo = limits[i].first, hi = limits[i].second;
             int bounces = 0;
@@ -704,27 +971,26 @@ int main(int argc, char* argv[])
                 else              prop[i] = 2*hi - prop[i];
                 ++bounces;
             }
-            prop[i] = std::clamp(prop[i], lo, hi);  // safety fallback
+            prop[i] = std::clamp(prop[i], lo, hi);
         }
         model.set_param(prop);
 
         // ─────────────────────────────────────────────────────────────
-        //  Evaluate prior (cheap — do BEFORE expensive model eval)
+        //  Evaluate prior
         // ─────────────────────────────────────────────────────────────
         double log_prior_prop = 0.0;
         if (use_priors) {
-            double pi = (iangle_idx >= 0) ? prop[iangle_idx]
-                                          : model.iangle.value;
-            double pq = (q_idx >= 0)      ? prop[q_idx]
-                                          : model.q.value;
-            double pv = (vs_idx >= 0)     ? prop[vs_idx]
-                                          : model.velocity_scale.value;
-            double pr = (r1_idx >= 0)     ? prop[r1_idx]
-                                          : model.r1.value;
+            double pi  = get_par(iangle_idx, model.iangle.value, prop);
+            double pq  = get_par(q_idx,      model.q.value,      prop);
+            double pv  = get_par(vs_idx,     model.velocity_scale.value, prop);
+            double pr  = get_par(r1_idx,     model.r1.value,     prop);
+            double pr2 = get_par(r2_idx,     model.r2.value,     prop);
+            double pt1 = get_par(t1_idx,     model.t1.value,     prop);
+            double pt2 = get_par(t2_idx,     model.t2.value,     prop);
 
-            log_prior_prop = PhysicalPrior::compute(pi, pq, pv, pr, obs);
+            log_prior_prop = PhysicalPrior::compute(
+                                 pi, pq, pv, pr, pr2, pt1, pt2, obs);
 
-            // Skip expensive model evaluation for hopeless proposals
             if (log_prior_prop <= -1e29) {
                 model.set_param(current_pars);
                 record_step(false);
@@ -761,10 +1027,21 @@ int main(int argc, char* argv[])
         }
 
         // ─────────────────────────────────────────────────────────────
-        //  Accept / reject
+        //  Accept / reject  (with optional annealing)
         // ─────────────────────────────────────────────────────────────
         bool this_accept = false;
-        double log_alpha = -0.5 * (chp - current_chisq)
+
+        // Annealing temperature: cool from T0 to 1.0 linearly
+        double temperature = 1.0;
+        if (anneal_enabled && step < anneal_steps && anneal_steps > 0)
+        {
+            double frac = double(step) / anneal_steps;
+            temperature = anneal_T0 * (1.0 - frac) + 1.0 * frac;
+        }
+
+        // The chi² contribution is tempered; the prior is NOT.
+        // log α = -0.5 * Δχ² / T  +  Δ(log-prior)
+        double log_alpha = -0.5 * (chp - current_chisq) / temperature
                          + (log_prior_prop - log_prior_current);
 
         if (log_alpha >= 0.0 || log(uni(rng)) < log_alpha) {
@@ -782,7 +1059,6 @@ int main(int argc, char* argv[])
             model.set_param(current_pars);
         }
 
-        // ── Feed adaptation ──────────────────────────────────────────
         record_step(this_accept);
 
         // ── Cholesky update ──────────────────────────────────────────
@@ -796,8 +1072,6 @@ int main(int argc, char* argv[])
                 bool ok = try_update_cholesky();
                 if (ok && !cov_ready) {
                     cov_ready = true;
-                    // ── Reset scale so (2.38²/d)·Σ is the starting
-                    //    proposal — Robbins-Monro fine-tunes from here
                     adapt_log_scale = 0.0;
                     adapt_batch     = 0;
                     adapt_window_accepts = 0;
@@ -810,7 +1084,7 @@ int main(int argc, char* argv[])
                          << RESET << endl;
                 }
                 if (!ok && cov_ready) {
-                    cov_ready = false;   // fall back to diagonal
+                    cov_ready = false;
                 }
             }
         }
@@ -829,7 +1103,7 @@ int main(int argc, char* argv[])
                                      log_prior_current};
         }
 
-        // ── Live plot (current accepted fit) ─────────────────────────
+        // ── Live plot ────────────────────────────────────────────────
         if (step % progress_interval == 0)
             Helpers::plot_model_live(data, current_fit, no_file, copy, gp);
 
@@ -896,7 +1170,6 @@ int main(int argc, char* argv[])
                  << " / " << chain.size() << endl;
         }
 
-        // ESS for chi-squared
         {
             vector<double> ctrace(chain.size());
             for (size_t s = 0; s < chain.size(); ++s)
@@ -958,7 +1231,6 @@ int main(int argc, char* argv[])
             }
         }
 
-        // Effective step sizes
         double sf_final = std::exp(adapt_log_scale);
         cout << BRIGHT_CYAN
              << "\nEffective step sizes (paste into model file):"
@@ -968,7 +1240,6 @@ int main(int argc, char* argv[])
                  << scientific << setprecision(6)
                  << (sf_final * cov_sd * sd[i]) << endl;
 
-        // Save to JSON
         json cov_info;
         for (int i = 0; i < npar; ++i) {
             cov_info["marginal_sigma"][names[i]] = sd[i];
@@ -993,21 +1264,47 @@ int main(int argc, char* argv[])
         cout << "  " << names[i] << " = " << best_pars[i] << endl;
 
     if (use_priors) {
-        double bi = (iangle_idx>=0) ? best_pars[iangle_idx]
-                                    : model.iangle.value;
-        double bq = (q_idx>=0)      ? best_pars[q_idx]
-                                    : model.q.value;
-        double bv = (vs_idx>=0)     ? best_pars[vs_idx]
-                                    : model.velocity_scale.value;
-        double br = (r1_idx>=0)     ? best_pars[r1_idx]
-                                    : model.r1.value;
-        cout << BRIGHT_CYAN << "Best-fit implied quantities:"
-             << RESET << endl;
-        PhysicalPrior::print_implied(bi, bq, bv, br, obs);
+        double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
+        double bq  = get_par(q_idx,      model.q.value,      best_pars);
+        double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
+        double br  = get_par(r1_idx,     model.r1.value,     best_pars);
+        double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
+        double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
+        double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
+
+        auto [lp_geom, lp_obs] = PhysicalPrior::compute_decomposed(
+            bi, bq, bv, br, br2, bt1, bt2, obs);
+
+        double lp_best = PhysicalPrior::compute(
+            bi, bq, bv, br, br2, bt1, bt2, obs);
+
+        cout << "  Best-fit log-prior: " << lp_best
+             << "  (geometric: " << lp_geom
+             << "  observational(×" << obs.prior_weight << "): "
+             << (obs.prior_weight * lp_obs) << ")" << endl;
+        cout << "  Best-fit -0.5·χ²:  " << (-0.5 * best_chisq) << endl;
+        cout << "  Best-fit log-post:  "
+             << (-0.5 * best_chisq + lp_best) << endl;
+
+        // ── Suggest prior_weight if badly imbalanced ──
+        if (lp_obs < -5.0 && obs.prior_weight <= 1.0) {
+            double suggested_w = std::min(100.0,
+                std::abs(0.5 * best_chisq / (lp_obs + 1e-30)));
+            cout << BRIGHT_YELLOW
+                 << "\n  The best-fit solution violates physical priors"
+                 << " (observational penalty = " << lp_obs << ").\n"
+                 << "  The light curve χ² is dominating.\n"
+                 << "  Suggested: add \"prior_weight\": "
+                 << fixed << setprecision(1) << suggested_w
+                 << " to your config JSON.\n"
+                 << "  This makes each prior constraint worth ~"
+                 << int(suggested_w) << " data points."
+                 << RESET << endl;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
-    //  Write chain (with thinning)
+    //  Write chain
     // ─────────────────────────────────────────────────────────────────
     {
         string chain_path = config.value("chain_out_path", "chain_out.txt");
