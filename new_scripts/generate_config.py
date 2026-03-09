@@ -16,7 +16,7 @@ New in v5
   written into the config and used by the MCMC solver
 • The optimiser now also uses M2, K2, q, M_total when available
 
-    pip install scipy astroquery astropy requests
+    pip install scipy astropy
 """
 
 import json
@@ -59,24 +59,6 @@ BAND_WAVELENGTH = {
     "Johnson-I": 790.0,
 }
 
-# VizieR filter-column suffixes for multi-filter Claret tables
-FILTER_SUFFIX = {
-    "TESS": "Te",
-    "Kepler": "Ke",
-    "SDSS-u": "u'",
-    "SDSS-g": "g'",
-    "SDSS-r": "r'",
-    "SDSS-i": "i'",
-    "SDSS-z": "z'",
-    "Johnson-U": "U",
-    "Johnson-B": "B",
-    "Johnson-V": "V",
-    "Johnson-R": "R",
-    "Johnson-I": "I",
-}
-
-TEFF_ALIASES = ("Teff", "teff", "Te", "TEFF")
-LOGG_ALIASES = ("logg", "Logg", "log(g)", "LOGG", "log_g")
 
 # ANSI colour codes
 W = "\033[97m"
@@ -373,8 +355,8 @@ def estimate_r2(M2_est, P_days, vs):
     return max(0.01, min(0.95, R2_Rsun * RSUN_KM / a_km))
 
 
-def beam_factor(T, wl_nm):
-    """Doppler beaming factor B(T, λ)."""
+def _beam_factor_analytic(T, wl_nm):
+    """Analytic Doppler beaming factor B(T, λ) — fallback."""
     x = 1.4388e7 / (T * wl_nm)
     if x > 500:
         return 5.0
@@ -402,264 +384,212 @@ def count_data_points(filepath):
         return 0
 
 
-# ═══════════════════ Claret / VizieR queries ═════════════════
+# ═══════════════════ Local Claret table queries ══════════════
+
+_PACKAGE_DIR = Path(__file__).resolve().parent
+CLARET_DIR = _PACKAGE_DIR / "data" / "claret_tables"
+
+# Filter-string mappings per table generation
+# Claret 2011 (A&A 529, A75) — MS multi-filter tables
+_FILTER_2011 = {
+    "Kepler": "Kp",
+    "SDSS-u": "u'", "SDSS-g": "g'", "SDSS-r": "r'",
+    "SDSS-i": "i'", "SDSS-z": "z'",
+    "Johnson-U": "U", "Johnson-B": "B", "Johnson-V": "V",
+    "Johnson-R": "R", "Johnson-I": "I",
+}
+
+# Claret 2020 (A&A 634, A93 / A&A 641, A157) — SD/WD tables & beaming
+_FILTER_2020 = {
+    "TESS": "Te", "Kepler": "Ke",
+    "SDSS-u": "u'", "SDSS-g": "g'", "SDSS-r": "r'",
+    "SDSS-i": "i'", "SDSS-z": "z'",
+    "Johnson-U": "U", "Johnson-B": "B", "Johnson-V": "V",
+    "Johnson-R": "R", "Johnson-I": "I",
+}
 
 
-def _claret_table(star_type, purpose, band):
+def _query_local_table(filepath, teff_col, logg_col, target_cols,
+                       T, logg, filter_col=None, filter_value=None,
+                       teff_is_log=False):
     """
-    Determine the correct VizieR table, column names, and filter string.
+    Read a whitespace-delimited Claret table and return values from
+    the row nearest to (T, logg), optionally filtering on a column.
 
     Parameters
     ----------
-    star_type : str  ('sd', 'wd', 'ms')
-    purpose   : str  ('ldc4' or 'gdc')
-    band      : str  photometric band name
+    filepath     : Path
+    teff_col     : int       column index for Teff (or log10 Teff)
+    logg_col     : int       column index for log g
+    target_cols  : [int]     column indices for values to extract
+    T            : float     target Teff [K]
+    logg         : float|None
+    filter_col   : int|None  column index for filter string (-1 = last)
+    filter_value : str|None  required exact match
+    teff_is_log  : bool      True if column contains log10(Teff)
 
     Returns
     -------
-    (table_id, column_names, filter_value)
-        filter_value is None for single-filter tables,
-        or a string to match against the 'Filter' column.
+    ([values], matched_Teff, matched_logg) or None
     """
-    # Filter strings used in Claret multi-filter tables
-
-    filt = FILTER_SUFFIX.get(band)
-
-    TABLES = {
-        ("sd", "ldc4"): (
-            "J/A+A/634/A93/tablea4",
-            ["a1", "a2", "a3", "a4"],
-            filt,
-        ),
-        ("sd", "gdc"): (
-            "J/A+A/634/A93/tabley",
-            ["y"],
-            filt,
-        ),
-        ("wd", "ldc4"): (
-            "J/A+A/641/A157/tablea4",
-            ["a1", "a2", "a3", "a4"],
-            filt,
-        ),
-        ("wd", "gdc"): (None, None, None),  # No WD GDC table
-    }
-
-    key = (star_type, purpose)
-    if key in TABLES:
-        return TABLES[key]
-
-    # Main-sequence
-    if star_type == "ms":
-        # Space-mission dedicated single-filter LDC tables (no Filter column)
-        space_tables = {
-            "TESS":   "J/A+A/618/A20/TESSa",
-            "KEPLER": "J/A+A/618/A20/KEPLERa",
-        }
-        band_upper = band.upper()
-
-        if band_upper in space_tables and purpose == "ldc4":
-            return space_tables[band_upper], ["a1", "a2", "a3", "a4"], None
-
-        if purpose == "ldc4":
-            # General MS LDC table — multi-filter
-            return "J/A+A/529/A75/tableeq5", ["a1", "a2", "a3", "a4"], filt
-        else:
-            # General MS GDC table — multi-filter
-            return "J/A+A/529/A75/tabley", ["y"], filt
-
-    return None, None, None
-
-
-def _find_col(colnames, aliases):
-    cn_map = {c.lower().strip(): c for c in colnames}
-    for a in aliases:
-        if a.lower() in cn_map:
-            return cn_map[a.lower()]
-    return None
-
-
-def _nearest_row(table, T, logg, tcol, gcol):
-    best_d, best_i = 1e30, 0
-    for idx in range(len(table)):
-        try:
-            t_val = float(table[tcol][idx])
-        except (ValueError, TypeError):
-            continue
-        d = abs(t_val - T) / max(T, 1)
-        if gcol and logg is not None:
-            try:
-                d += abs(float(table[gcol][idx]) - logg) / 5.0
-            except (ValueError, TypeError):
-                pass
-        if d < best_d:
-            best_d, best_i = d, idx
-    return best_i
-
-
-def _resolve_columns(available_colnames, target_cols):
-    avail = {c.strip().lower(): c.strip() for c in available_colnames}
-    resolved = []
-    for tc in target_cols:
-        if tc.lower() in avail:
-            resolved.append(avail[tc.lower()])
-        else:
-            return None
-    return resolved
-
-
-def _query_vizier(table_id, target_cols, T, logg, filter_value=None):
-    """
-    Query a VizieR table for rows near (T, logg), optionally
-    filtering on a 'Filter' column.
-    Returns (values_list, matched_Teff, matched_logg) or None.
-    """
-    result = _query_vizier_astroquery(table_id, target_cols, T, logg,
-                                      filter_value)
-    if result is not None:
-        return result
-    return _query_vizier_http(table_id, target_cols, T, logg, filter_value)
-
-
-def _query_vizier_astroquery(table_id, target_cols, T, logg,
-                              filter_value=None):
-    """Try fetching via astroquery."""
-    try:
-        from astroquery.vizier import Vizier
-    except ImportError:
+    if not filepath.exists():
+        print(f"    {Y}File not found: {filepath}{Z}")
         return None
 
-    try:
-        dT = max(500, int(0.05 * T))
-        constraints = {"Teff": f"{T - dT}..{T + dT}"}
-        if logg is not None:
-            constraints["logg"] = (
-                f"{max(0, logg - 0.5):.1f}..{min(10, logg + 0.5):.1f}"
-            )
-        if filter_value is not None:
-            constraints["Filter"] = f"=={filter_value}"
-
-        v = Vizier(columns=["**"], row_limit=500)
-        result = v.query_constraints(catalog=table_id, **constraints)
-        if not result or len(result) == 0:
-            return None
-
-        tbl = result[0]
-        tcol = _find_col(tbl.colnames, TEFF_ALIASES)
-        gcol = _find_col(tbl.colnames, LOGG_ALIASES)
-        if tcol is None:
-            return None
-
-        resolved = _resolve_columns(tbl.colnames, target_cols)
-        if resolved is None:
-            return None
-
-        bi = _nearest_row(tbl, T, logg, tcol, gcol)
-        vals = []
-        for c in resolved:
-            try:
-                vals.append(float(tbl[c][bi]))
-            except (ValueError, TypeError):
-                return None
-
-        t_match = float(tbl[tcol][bi])
-        g_match = float(tbl[gcol][bi]) if gcol else None
-        return vals, t_match, g_match
-    except Exception as e:
-        print(f"    {D}astroquery: {e}{Z}")
-        return None
-
-
-def _query_vizier_http(table_id, target_cols, T, logg, filter_value=None):
-    """HTTP/TSV fallback for VizieR queries."""
-    try:
-        import requests
-    except ImportError:
-        return None
+    best_d = 1e30
+    best_vals = None
+    best_t = None
+    best_g = None
 
     try:
-        dT = max(500, int(0.05 * T))
-        out_cols = ["Teff", "logg"] + target_cols
-        if filter_value is not None:
-            out_cols.append("Filter")
+        with open(filepath) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("!"):
+                    continue
+                fields = line.split()
 
-        params = {
-            "-source": table_id,
-            "-out": " ".join(out_cols),
-            "-out.max": "500",
-            "Teff": f"{T - dT}..{T + dT}",
-        }
-        if logg is not None:
-            params["logg"] = (
-                f"{max(0, logg - 0.5):.1f}..{min(10, logg + 0.5):.1f}"
-            )
-        if filter_value is not None:
-            params["Filter"] = f"=={filter_value}"
-
-        rsp = requests.get(
-            "https://vizier.cds.unistra.fr/viz-bin/asu-tsv",
-            params=params,
-            timeout=20,
-        )
-        if not rsp.ok:
-            return None
-
-        lines = [
-            l
-            for l in rsp.text.split("\n")
-            if l.strip() and not l.startswith("#") and not l.startswith("-")
-        ]
-        if len(lines) < 2:
-            return None
-
-        hdr = {h.strip().lower(): i for i, h in enumerate(lines[0].split("\t"))}
-
-        ti = next(
-            (hdr[a.lower()] for a in TEFF_ALIASES if a.lower() in hdr), None
-        )
-        gi = next(
-            (hdr[a.lower()] for a in LOGG_ALIASES if a.lower() in hdr), None
-        )
-        if ti is None:
-            return None
-
-        col_indices = []
-        for tc in target_cols:
-            if tc.lower() in hdr:
-                col_indices.append(hdr[tc.lower()])
-            else:
-                return None
-
-        # Filter column index (for row-level filtering if server
-        # didn't honour the constraint exactly)
-        fi = hdr.get("filter")
-
-        best_d, best_vals, best_t, best_g = 1e30, None, None, None
-        for ln in lines[1:]:
-            fields = ln.split("\t")
-            try:
-                # Skip rows that don't match the filter
-                if filter_value is not None and fi is not None:
-                    row_filter = fields[fi].strip()
-                    if row_filter != filter_value:
+                # ── Filter check ──
+                if filter_col is not None and filter_value is not None:
+                    try:
+                        fc = fields[filter_col].strip()
+                        if fc != filter_value:
+                            continue
+                    except IndexError:
                         continue
 
-                tv = float(fields[ti])
-                gv = float(fields[gi]) if gi is not None else 4.5
-                d = abs(tv - T) / max(T, 1) + abs(gv - (logg or 4.5)) / 5
-                if d < best_d:
-                    best_d = d
-                    best_vals = [float(fields[ci]) for ci in col_indices]
-                    best_t, best_g = tv, gv
-            except (ValueError, IndexError):
-                continue
+                # ── Parse Teff ──
+                try:
+                    teff_raw = float(fields[teff_col])
+                    row_teff = 10.0 ** teff_raw if teff_is_log else teff_raw
+                except (ValueError, IndexError):
+                    continue
 
-        if best_vals is not None:
-            return best_vals, best_t, best_g
-    except Exception as e:
-        print(f"    {D}HTTP: {e}{Z}")
+                # ── Parse logg ──
+                try:
+                    row_logg = float(fields[logg_col])
+                except (ValueError, IndexError):
+                    row_logg = None
+
+                # ── Distance metric ──
+                d = abs(row_teff - T) / max(T, 1.0)
+                if logg is not None and row_logg is not None:
+                    d += abs(row_logg - logg) / 5.0
+
+                if d < best_d:
+                    try:
+                        vals = [float(fields[ci]) for ci in target_cols]
+                        best_d = d
+                        best_vals = vals
+                        best_t = row_teff
+                        best_g = row_logg
+                    except (ValueError, IndexError):
+                        continue
+
+    except (OSError, IOError) as e:
+        print(f"    {Y}Could not read {filepath}: {e}{Z}")
+        return None
+
+    if best_vals is not None:
+        return best_vals, best_t, best_g
+    return None
+
+
+# ── LDC table selection ──────────────────────────────────────
+
+def _get_ldc_spec(star_type, band):
+    """
+    Return (filepath, teff_col, logg_col, target_cols, filter_col,
+            filter_value, teff_is_log) for an LDC query, or None.
+
+    File layouts
+    ────────────
+    Claret2018_MS_TESS_LDC.dat / _KEPLER_LDC.dat
+        vturb  Teff  [Fe/H]  logg  a1  a2  a3  a4  ...  method  band
+        col:   0     1       2      3   4   5   6   7
+
+    Claret2011_MS_multifilter_LDC.dat
+        vturb  Teff  [Fe/H]  logg  a1  a2  a3  a4  Filter  method  model
+        col:   0     1       2      3   4   5   6   7   8
+
+    Claret2020_sd_LDC.dat  (used for sd AND wd)
+        type  logg  Teff  Z  a1  a2  a3  a4  ...  ...  ...  Filter
+        col:  0     1     2  3   4   5   6   7                -1
+    """
+    if star_type == "ms":
+        if band.upper() == "TESS":
+            return (CLARET_DIR / "Claret2018_MS_TESS_LDC.dat",
+                    1, 3, [4, 5, 6, 7], None, None, False)
+        if band in ("Kepler", "KEPLER") or band.upper() == "KEPLER":
+            return (CLARET_DIR / "Claret2018_MS_KEPLER_LDC.dat",
+                    1, 3, [4, 5, 6, 7], None, None, False)
+        filt = _FILTER_2011.get(band)
+        if filt is None:
+            return None
+        return (CLARET_DIR / "Claret2011_MS_multifilter_LDC.dat",
+                1, 3, [4, 5, 6, 7], 8, filt, False)
+
+    if star_type in ("sd", "wd"):
+        filt = _FILTER_2020.get(band)
+        if filt is None:
+            return None
+        return (CLARET_DIR / "Claret2020_sd_LDC.dat",
+                2, 1, [4, 5, 6, 7], -1, filt, False)
 
     return None
 
+
+# ── GDC table selection ──────────────────────────────────────
+
+def _get_gdc_spec(star_type, band):
+    """
+    Return table spec for a gravity-darkening query, or None.
+
+    File layouts
+    ────────────
+    Claret2011_GDC_MS.dat
+        vturb  log10(Teff)  [Fe/H]  logg  y  Filter  model
+        col:   0     1            2      3  4  5
+
+    Claret2020_sd_GDC.dat  (used for sd AND wd)
+        type  logg  Teff  Z  y  y2(?)  Filter
+        col:  0     1     2  3  4      5      -1
+    """
+    if star_type == "ms":
+        filt = _FILTER_2011.get(band)
+        if filt is None:
+            return None
+        return (CLARET_DIR / "Claret2011_GDC_MS.dat",
+                1, 3, [4], 5, filt, True)          # teff_is_log=True
+
+    if star_type in ("sd", "wd"):
+        filt = _FILTER_2020.get(band)
+        if filt is None:
+            return None
+        return (CLARET_DIR / "Claret2020_sd_GDC.dat",
+                2, 1, [4], -1, filt, False)
+
+    return None
+
+
+# ── Beaming table selection ──────────────────────────────────
+
+def _get_beaming_spec(band):
+    """
+    Return table spec for a beaming-factor query, or None.
+
+    Claret2020_beaming.dat
+        type  Filter  logg  Teff  Z  be
+        col:  0       1     2     3  4  5
+    """
+    filt = _FILTER_2020.get(band)
+    if filt is None:
+        return None
+    return (CLARET_DIR / "Claret2020_beaming.dat",
+            3, 2, [5], 1, filt, False)
+
+
+# ── Public query API ─────────────────────────────────────────
 
 def _default_ldc(T):
     if T > 20000:
@@ -672,53 +602,89 @@ def _default_ldc(T):
 
 
 def query_ldc(T, logg, star_type, band):
-    """Fetch 4-coefficient limb-darkening from Claret. Returns [a1..a4]."""
-    table_id, cols, filter_value = _claret_table(star_type, "ldc4", band)
-    if table_id is None:
+    """Fetch 4-coefficient limb-darkening from local Claret tables."""
+    spec = _get_ldc_spec(star_type, band)
+    if spec is None:
         print(f"    {Y}No LDC table for type={star_type}, band={band}{Z}")
         return _default_ldc(T)
 
-    finfo = f"  Filter={filter_value}" if filter_value else ""
-    print(f"    Querying {table_id}  cols={cols}{finfo}")
-    result = _query_vizier(table_id, cols, T, logg, filter_value)
+    filepath, teff_col, logg_col, target_cols, fc, fv, tlog = spec
+    finfo = f"  filter={fv}" if fv else ""
+    print(f"    Reading {filepath.name}{finfo}")
+
+    result = _query_local_table(filepath, teff_col, logg_col, target_cols,
+                                T, logg, fc, fv, tlog)
     if result:
         vals, t_m, g_m = result
-        logg_str = f", logg={g_m:.1f}" if g_m else ""
-        print(
-            f"    {G}LDC: [{', '.join(f'{v:.4f}' for v in vals)}]"
-            f"  (grid Teff={t_m:.0f}{logg_str}){Z}"
-        )
+        gs = f", logg={g_m:.1f}" if g_m is not None else ""
+        print(f"    {G}LDC: [{', '.join(f'{v:.4f}' for v in vals)}]"
+              f"  (grid Teff={t_m:.0f}{gs}){Z}")
         return vals
 
-    print(f"    {Y}Query returned nothing — using defaults{Z}")
+    print(f"    {Y}No matching row — using defaults{Z}")
     return _default_ldc(T)
 
 
 def query_gdc(T, logg, star_type, band):
-    """Fetch gravity-darkening coefficient y. Returns float."""
-    table_id, cols, filter_value = _claret_table(star_type, "gdc", band)
-    if table_id is None:
+    """Fetch gravity-darkening coefficient y from local Claret tables."""
+    spec = _get_gdc_spec(star_type, band)
+    if spec is None:
         gd = 0.25 if T > 7500 else 0.08
-        print(
-            f"    {D}No GDC table for type={star_type} — "
-            f"using theoretical β={gd:.2f}{Z}"
-        )
+        print(f"    {D}No GDC table for type={star_type}, band={band}"
+              f" — using theoretical β={gd:.2f}{Z}")
         return gd
 
-    finfo = f"  Filter={filter_value}" if filter_value else ""
-    print(f"    Querying {table_id}  col={cols[0]}{finfo}")
-    result = _query_vizier(table_id, cols, T, logg, filter_value)
+    filepath, teff_col, logg_col, target_cols, fc, fv, tlog = spec
+    finfo = f"  filter={fv}" if fv else ""
+    print(f"    Reading {filepath.name}{finfo}")
+
+    result = _query_local_table(filepath, teff_col, logg_col, target_cols,
+                                T, logg, fc, fv, tlog)
     if result:
         vals, t_m, g_m = result
         y = vals[0]
-        logg_str = f", logg={g_m:.1f}" if g_m else ""
-        print(f"    {G}GDC: y = {y:.4f}  (grid Teff={t_m:.0f}{logg_str}){Z}")
+        gs = f", logg={g_m:.1f}" if g_m is not None else ""
+        print(f"    {G}GDC: y = {y:.4f}  (grid Teff={t_m:.0f}{gs}){Z}")
         return y
 
     gd = 0.25 if T > 7500 else 0.08
-    print(f"    {Y}Query returned nothing — using theoretical β={gd:.2f}{Z}")
+    print(f"    {Y}No matching row — using theoretical β={gd:.2f}{Z}")
     return gd
 
+
+def query_beaming(T, logg, band):
+    """
+    Fetch beaming factor from local Claret 2020 table.
+    Falls back to the analytic approximation if no table match.
+    """
+    spec = _get_beaming_spec(band)
+    if spec is not None:
+        filepath, teff_col, logg_col, target_cols, fc, fv, tlog = spec
+        result = _query_local_table(filepath, teff_col, logg_col,
+                                    target_cols, T, logg, fc, fv, tlog)
+        if result:
+            vals, t_m, g_m = result
+            b = vals[0]
+            gs = f", logg={g_m:.1f}" if g_m is not None else ""
+            print(f"    {G}Beaming: B = {b:.4f}  "
+                  f"(grid Teff={t_m:.0f}{gs}){Z}")
+            return b
+
+    # Analytic fallback
+    wl = BAND_WAVELENGTH.get(band, 786.5)
+    b = _beam_factor_analytic(T, wl)
+    print(f"    {D}Beaming table miss — analytic B = {b:.4f}{Z}")
+    return b
+
+def _query_beaming_quiet(T, logg, band):
+    """Query beaming with output suppressed (curses-safe)."""
+    with contextlib.redirect_stdout(io.StringIO()), \
+         contextlib.redirect_stderr(io.StringIO()):
+        try:
+            return query_beaming(T, logg, band)
+        except Exception:
+            wl = BAND_WAVELENGTH.get(band, 786.5)
+            return _beam_factor_analytic(T, wl)
 
 # ═══════════════════ Parameter builder ═══════════════════════
 
@@ -727,62 +693,98 @@ def _make_param(val, rng, step, vary=False, defined=True):
     return ModelParam(val, rng, step, vary, defined).to_str()
 
 
-def build_model_params(
-    q, i, r1, r2, vs, t1, t2, ldc1, ldc2, gd1, gd2, bf1, bf2, t0, varied
-):
-    is_varied = lambda name: name in varied  # noqa: E731
+def build_model_params(q, i, r1, r2, vs, t1, t2,
+                       ldc1, ldc2, gd1, gd2, bf1, bf2, t0,
+                       varied):
+    """
+    Build the model_parameters dict for the JSON config.
+
+    Each parameter value string has the format:
+        value  range  step  vary  use
+
+    'range' controls the initial simplex size (simplex vertex =
+    value ± range), so it must not push the parameter into
+    unphysical territory.  For r1 and r2 the hard ceiling is the
+    Roche-lobe radius, which depends on q.  We use conservative
+    fractions of the current value.
+    """
+
+    def _flag(name):
+        return "1" if name in varied else "0"
+
+    # ── Range helpers ──
+    # For radii: range should be a modest fraction of value,
+    # never pushing value+range above ~0.5 (safe Roche limit)
+    def _radius_range(val):
+        r = min(0.3 * max(val, 0.01), 0.5 - val) if val < 0.5 else 0.01
+        return max(r, 0.001)
+
+    # For q: keep range proportional, but bounded
+    def _q_range(val):
+        return min(2.0 * val, 5.0)
+
+    # For velocity_scale: proportional range
+    def _vs_range(val):
+        return max(0.5 * val, 10.0)
+
+    # For inclination: allow full geometric range
+    def _i_range(val):
+        return min(val, 90.0 - val, 45.0)
+
+    # For temperatures: ~50% range
+    def _t_range(val):
+        return max(0.5 * val, 1000.0)
 
     p = {}
 
-    # ── Physical parameters ──
-    p["q"] = _make_param(
-        round(q, 6), max(q, 5), max(0.01, 0.02 * q), is_varied("q")
-    )
-    p["iangle"] = _make_param(round(i, 4), 45, 1.0, is_varied("iangle"))
-    p["r1"] = _make_param(
-        round(r1, 6), 0.5, max(0.001, 0.01 * r1), is_varied("r1")
-    )
-    p["r2"] = _make_param(
-        round(r2, 6), 0.5, max(0.002, 0.015 * r2), is_varied("r2")
-    )
-    p["velocity_scale"] = _make_param(
-        round(vs, 4),
-        max(vs, 500),
-        max(1.0, 0.02 * vs),
-        is_varied("velocity_scale"),
-    )
+    # ── Fitted parameters ──
+    p["q"] = (f"{q} {_q_range(q):.4f} "
+               f"{max(q * 0.02, 0.001):.6g} {_flag('q')} 1")
+
+    p["iangle"] = (f"{i} {_i_range(i):.2f} "
+                    f"1.0 {_flag('iangle')} 1")
+
+    p["r1"] = (f"{r1} {_radius_range(r1):.6f} "
+                f"{max(r1 * 0.01, 1e-5):.6g} {_flag('r1')} 1")
+
+    p["r2"] = (f"{r2} {_radius_range(r2):.6f} "
+                f"{max(r2 * 0.015, 1e-5):.6g} {_flag('r2')} 1")
+
+    p["velocity_scale"] = (f"{vs} {_vs_range(vs):.4f} "
+                            f"{max(vs * 0.02, 0.1):.6g} "
+                            f"{_flag('velocity_scale')} 1")
 
     # ── Temperatures ──
-    p["t1"] = _make_param(
-        round(t1, 3), 15000, max(10, 0.005 * t1), is_varied("t1")
-    )
-    p["t2"] = _make_param(
-        round(t2, 3), 10000, max(10, 0.02 * t2), is_varied("t2")
-    )
+    p["t1"] = (f"{t1} {_t_range(t1):.1f} "
+                f"{max(t1 * 0.005, 10.0):.4g} {_flag('t1')} 1")
+
+    p["t2"] = (f"{t2} {_t_range(t2):.1f} "
+                f"{max(t2 * 0.02, 10.0):.4g} {_flag('t2')} 1")
 
     # ── Limb darkening ──
-    for star_idx, ldc in enumerate([ldc1, ldc2], start=1):
-        for j, coeff in enumerate(ldc, start=1):
-            name = f"ldc{star_idx}_{j}"
-            p[name] = _make_param(round(coeff, 4), 0.5, 0.001, is_varied(name))
+    for j in range(4):
+        p[f"ldc1_{j+1}"] = (f"{ldc1[j]} 0.5 0.001 "
+                             f"{_flag(f'ldc1_{j+1}')} 1")
+        p[f"ldc2_{j+1}"] = (f"{ldc2[j]} 0.5 0.001 "
+                             f"{_flag(f'ldc2_{j+1}')} 1")
 
     # ── Beaming ──
-    p["beam_factor1"] = _make_param(
-        round(bf1, 4), 1, 0.01, is_varied("beam_factor1")
-    )
-    p["beam_factor2"] = _make_param(
-        round(bf2, 4), 1, 0.01, is_varied("beam_factor2")
-    )
+    p["beam_factor1"] = (f"{bf1} 1 0.01 "
+                          f"{_flag('beam_factor1')} 1")
+    p["beam_factor2"] = (f"{bf2} 1 0.01 "
+                          f"{_flag('beam_factor2')} 1")
 
-    # ── Ephemeris ──
-    p["t0"] = _make_param(round(t0, 8), 0.1, 1e-05, is_varied("t0"))
-    p["period"] = _make_param(1, 0.001, 1e-08, False)
-    p["pdot"] = _make_param(0, 0.01, 1e-05, False)
-    p["deltat"] = _make_param(0, 0.001, 0.0001, False)
+    # ── Phase / period ──
+    p["t0"] = f"{t0} 0.1 1e-05 {_flag('t0')} 1"
+    p["period"] = f"1 0.001 1e-08 {_flag('period')} 1"
+    p["pdot"] = f"0 0.01 1e-05 {_flag('pdot')} 1"
+    p["deltat"] = f"0 0.001 0.0001 {_flag('deltat')} 1"
 
     # ── Gravity darkening ──
-    p["gravity_dark1"] = _make_param(round(gd1, 4), 0.1, 1e-06, False)
-    p["gravity_dark2"] = _make_param(round(gd2, 4), 0.1, 1e-06, False)
+    p["gravity_dark1"] = (f"{gd1} 0.1 1e-06 "
+                           f"{_flag('gravity_dark1')} 1")
+    p["gravity_dark2"] = (f"{gd2} 0.1 1e-06 "
+                           f"{_flag('gravity_dark2')} 1")
 
     # ── Misc fixed parameters ──
     p["absorb"] = _make_param(1.0, 0.5, 0.01, False)
@@ -913,6 +915,7 @@ class FormField:
         self.buf = str(default) if default is not None else ""
         self.choice_idx = 0
         self.error = ""
+        self.cursor_pos = len(self.buf)  # ← NEW
 
         if ftype == FieldType.CHOICE and default and default in self.choices:
             self.choice_idx = self.choices.index(default)
@@ -922,6 +925,8 @@ class FormField:
 
         if ftype == FieldType.MEASUREMENT and isinstance(default, Measurement):
             self.buf = f"{default.value} {default.err_lo} {default.err_hi}"
+
+        self.cursor_pos = len(self.buf)  # ← NEW (update after all buf changes)
 
     @property
     def editable(self):
@@ -978,6 +983,7 @@ class FormField:
     def set_from_value(self, val):
         if val is None:
             self.buf = ""
+            self.cursor_pos = 0
             return
         if self.ftype == FieldType.BOOL:
             self.buf = "Yes" if val else "No"
@@ -991,6 +997,7 @@ class FormField:
                 self.buf = str(val)
         else:
             self.buf = str(val)
+        self.cursor_pos = len(self.buf)
 
     def validate(self):
         if not self.editable:
@@ -1162,7 +1169,8 @@ class FormApp:
             f"{page.title} "
         ).ljust(w)
         try:
-            stdscr.addnstr(0, 0, title_str, w, curses.color_pair(6) | curses.A_BOLD)
+            stdscr.addnstr(0, 0, title_str, w,
+                           curses.color_pair(6) | curses.A_BOLD)
         except curses.error:
             pass
 
@@ -1184,7 +1192,8 @@ class FormApp:
         label_w = max((len(f.label) for _, f in visible), default=12) + 2
         field_w = max(20, w - label_w - 8)
 
-        cursor_screen_row = row  # track for cursor placement
+        cursor_screen_row = row
+        cursor_screen_col = 0
 
         for real_idx, fld in visible:
             if row >= h - 5:
@@ -1195,7 +1204,8 @@ class FormApp:
 
             if fld.ftype == FieldType.SEPARATOR:
                 try:
-                    sep_text = f"{'─' * 3} {fld.label} {'─' * (w - len(fld.label) - 10)}"
+                    sep_text = (f"{'─' * 3} {fld.label} "
+                                f"{'─' * (w - len(fld.label) - 10)}")
                     stdscr.addnstr(row, 1, sep_text[:w - 2], w - 2,
                                    curses.color_pair(1) | curses.A_DIM)
                 except curses.error:
@@ -1206,10 +1216,12 @@ class FormApp:
             # Label
             label_attr = curses.A_BOLD if is_active else curses.A_NORMAL
             try:
-                stdscr.addnstr(row, 1, prefix, 3,
-                               curses.color_pair(2) if is_active else curses.A_DIM)
-                stdscr.addnstr(row, 4, fld.label.ljust(label_w)[:label_w],
-                               label_w, curses.color_pair(7) | label_attr)
+                stdscr.addnstr(
+                    row, 1, prefix, 3,
+                    curses.color_pair(2) if is_active else curses.A_DIM)
+                stdscr.addnstr(
+                    row, 4, fld.label.ljust(label_w)[:label_w],
+                    label_w, curses.color_pair(7) | label_attr)
             except curses.error:
                 pass
 
@@ -1219,15 +1231,18 @@ class FormApp:
 
             if fld.ftype == FieldType.CHOICE:
                 choice_str = f"◂ {display} ▸"
-                attr = curses.color_pair(2) | curses.A_BOLD if is_active else curses.A_NORMAL
+                attr = (curses.color_pair(2) | curses.A_BOLD
+                        if is_active else curses.A_NORMAL)
                 try:
                     stdscr.addnstr(row, val_col, choice_str[:field_w],
                                    field_w, attr)
                 except curses.error:
                     pass
             elif fld.ftype == FieldType.BOOL:
-                bool_str = f"[{'✓' if fld.buf.startswith('Y') else ' '}] {fld.buf}"
-                attr = curses.color_pair(2) if fld.buf.startswith("Y") else curses.A_DIM
+                bool_str = (f"[{'✓' if fld.buf.startswith('Y') else ' '}] "
+                            f"{fld.buf}")
+                attr = (curses.color_pair(2)
+                        if fld.buf.startswith("Y") else curses.A_DIM)
                 if is_active:
                     attr |= curses.A_BOLD
                 try:
@@ -1244,17 +1259,31 @@ class FormApp:
             else:
                 # Editable text/number/measurement
                 if is_active:
-                    # Draw input box
-                    box = fld.buf.ljust(field_w)[:field_w]
+                    # Draw input box with visible cursor position
+                    # Scroll the view if cursor is beyond visible width
+                    cpos = fld.cursor_pos
+                    buf = fld.buf
+
+                    # Determine visible window of the buffer
+                    if cpos < field_w:
+                        vis_start = 0
+                    else:
+                        vis_start = cpos - field_w + 1
+
+                    vis_buf = buf[vis_start:vis_start + field_w]
+                    box = vis_buf.ljust(field_w)[:field_w]
                     try:
                         stdscr.addnstr(row, val_col, box, field_w,
                                        curses.color_pair(5))
                     except curses.error:
                         pass
+
                     cursor_screen_row = row
+                    cursor_screen_col = val_col + (cpos - vis_start)
                 else:
                     disp = display if display else (
-                        f"({fld.default})" if fld.default is not None else ""
+                        f"({fld.default})"
+                        if fld.default is not None else ""
                     )
                     attr = curses.A_NORMAL if display else curses.A_DIM
                     try:
@@ -1268,7 +1297,8 @@ class FormApp:
                 row += 1
                 if row < h - 5:
                     msg = fld.error if fld.error else fld.help_text
-                    attr = curses.color_pair(4) if fld.error else curses.A_DIM
+                    attr = (curses.color_pair(4)
+                            if fld.error else curses.A_DIM)
                     try:
                         stdscr.addnstr(row, val_col, msg[:field_w],
                                        field_w, attr)
@@ -1307,7 +1337,7 @@ class FormApp:
 
         # ── Footer ──
         footer = (
-            " ↑↓ Navigate  ←→ Prev/Next page  "
+            " ↑↓ Navigate  PgUp/PgDn Pages  "
             "Enter Confirm  Tab Next field  "
             "Ctrl+S Save  Ctrl+Q Quit "
         )
@@ -1333,9 +1363,9 @@ class FormApp:
         if fld and fld.editable and fld.ftype not in (
             FieldType.CHOICE, FieldType.BOOL
         ):
-            cx = 4 + label_w + 1 + len(fld.buf)
             try:
-                stdscr.move(cursor_screen_row, min(cx, w - 2))
+                stdscr.move(cursor_screen_row,
+                            min(cursor_screen_col, w - 2))
             except curses.error:
                 pass
 
@@ -1352,46 +1382,75 @@ class FormApp:
 
         self.message = ""
 
+        # Helper: is the current field a text-entry type?
+        def _is_text_field(f):
+            return (f is not None and f.editable and f.ftype not in (
+                FieldType.CHOICE, FieldType.BOOL, FieldType.READONLY,
+                FieldType.SEPARATOR))
+
         # ── Special keys ──
         if isinstance(ch, int):
             if ch == curses.KEY_UP:
                 page.move_cursor(-1)
+
             elif ch == curses.KEY_DOWN or ch == 9:  # Tab
                 page.move_cursor(1)
+
             elif ch == curses.KEY_LEFT:
                 if fld and fld.ftype == FieldType.CHOICE:
                     fld.choice_idx = (fld.choice_idx - 1) % len(fld.choices)
-                else:
-                    self._go_prev_page()
+                elif _is_text_field(fld):
+                    fld.cursor_pos = max(0, fld.cursor_pos - 1)
+
             elif ch == curses.KEY_RIGHT:
                 if fld and fld.ftype == FieldType.CHOICE:
                     fld.choice_idx = (fld.choice_idx + 1) % len(fld.choices)
-                else:
-                    self._go_next_page()
+                elif _is_text_field(fld):
+                    fld.cursor_pos = min(len(fld.buf), fld.cursor_pos + 1)
+
             elif ch == curses.KEY_BACKSPACE or ch == 127:
-                if fld and fld.editable and fld.ftype not in (
-                    FieldType.CHOICE, FieldType.BOOL
-                ):
-                    fld.buf = fld.buf[:-1]
+                if _is_text_field(fld) and fld.cursor_pos > 0:
+                    p = fld.cursor_pos
+                    fld.buf = fld.buf[:p - 1] + fld.buf[p:]
+                    fld.cursor_pos = p - 1
                     fld.error = ""
-            elif ch == curses.KEY_DC:  # Delete
-                if fld and fld.editable:
+
+            elif ch == curses.KEY_DC:  # Delete key
+                if _is_text_field(fld):
+                    p = fld.cursor_pos
+                    if p < len(fld.buf):
+                        fld.buf = fld.buf[:p] + fld.buf[p + 1:]
+                    fld.error = ""
+                elif fld and fld.editable:
                     fld.buf = ""
+                    fld.cursor_pos = 0
                     fld.error = ""
-            elif ch == curses.KEY_NPAGE:  # Page Down
-                self._go_next_page()
-            elif ch == curses.KEY_PPAGE:  # Page Up
-                self._go_prev_page()
+
             elif ch == curses.KEY_HOME:
-                page._init_cursor()
+                if _is_text_field(fld):
+                    fld.cursor_pos = 0
+                else:
+                    page._init_cursor()
+
+            elif ch == curses.KEY_END:
+                if _is_text_field(fld):
+                    fld.cursor_pos = len(fld.buf)
+
+            elif ch == curses.KEY_NPAGE:  # Page Down → next page
+                self._go_next_page()
+
+            elif ch == curses.KEY_PPAGE:  # Page Up → prev page
+                self._go_prev_page()
+
             elif ch == curses.KEY_RESIZE:
                 pass
+
             return
 
         # ── Character input ──
         if isinstance(ch, str):
             if ch == "\n" or ch == "\r":
-                # Enter: move to next field, or next page if last field
+                # Enter: next field, or next page if last field
                 vf = page.visible_fields()
                 editable = [i for i, f in vf if f.editable]
                 try:
@@ -1413,15 +1472,46 @@ class FormApp:
                 self.message = "Saved. Exiting."
                 self.running = False
 
-            elif ch == "\x1b":  # Escape
+            elif ch == "\x1b":  # Escape → prev page
                 self._go_prev_page()
 
-            elif ch == "\t":  # Tab
+            elif ch == "\x0e":  # Ctrl+N → next page
+                self._go_next_page()
+
+            elif ch == "\x10":  # Ctrl+P → prev page
+                self._go_prev_page()
+
+            elif ch == "\t":  # Tab → next field
                 page.move_cursor(1)
 
             elif ch == "\x15":  # Ctrl+U: clear field
                 if fld and fld.editable:
                     fld.buf = ""
+                    fld.cursor_pos = 0
+
+            elif ch == "\x01":  # Ctrl+A: Home
+                if _is_text_field(fld):
+                    fld.cursor_pos = 0
+
+            elif ch == "\x05":  # Ctrl+E: End
+                if _is_text_field(fld):
+                    fld.cursor_pos = len(fld.buf)
+
+            elif ch == "\x0b":  # Ctrl+K: kill to end of line
+                if _is_text_field(fld):
+                    fld.buf = fld.buf[:fld.cursor_pos]
+
+            elif ch == "\x17":  # Ctrl+W: delete word backwards
+                if _is_text_field(fld) and fld.cursor_pos > 0:
+                    p = fld.cursor_pos
+                    # Skip trailing spaces
+                    while p > 0 and fld.buf[p - 1] == " ":
+                        p -= 1
+                    # Skip word chars
+                    while p > 0 and fld.buf[p - 1] != " ":
+                        p -= 1
+                    fld.buf = fld.buf[:p] + fld.buf[fld.cursor_pos:]
+                    fld.cursor_pos = p
 
             else:
                 if fld and fld.editable:
@@ -1429,15 +1519,18 @@ class FormApp:
                         if ch.lower() in ("y", "n"):
                             fld.buf = "Yes" if ch.lower() == "y" else "No"
                         elif ch == " ":
-                            fld.buf = "No" if fld.buf.startswith("Y") else "Yes"
+                            fld.buf = ("No" if fld.buf.startswith("Y")
+                                       else "Yes")
                     elif fld.ftype == FieldType.CHOICE:
-                        # Type first letter to jump
                         for ci, cv in enumerate(fld.choices):
                             if cv.lower().startswith(ch.lower()):
                                 fld.choice_idx = ci
                                 break
                     else:
-                        fld.buf += ch
+                        # Insert character at cursor position
+                        p = fld.cursor_pos
+                        fld.buf = fld.buf[:p] + ch + fld.buf[p:]
+                        fld.cursor_pos = p + 1
                         fld.error = ""
 
     def _go_next_page(self):
@@ -1997,19 +2090,23 @@ def _on_enter_ldc(state):
 
 
 def _on_leave_beaming(state):
-    """Compute beaming factors if auto-compute is set and fields are default/empty."""
+    """Compute beaming factors from Claret table (or analytic fallback)."""
     if state.get("auto_beaming"):
         T1 = state.get("T1")
         T2 = state.get("T2")
-        wl = float(state.get("wavelength", 786.5))
+        band = state.get("band", "TESS")
+        logg1 = state.get("logg1")
+        logg2 = state.get("logg2")
+        parts = []
         if T1:
-            state["bf1"] = round(beam_factor(T1, wl), 4)
+            bf1 = _query_beaming_quiet(T1, logg1, band)
+            state["bf1"] = round(bf1, 4)
+            parts.append(f"B1={bf1:.4f}")
         if T2:
-            state["bf2"] = round(beam_factor(T2, wl), 4)
-        state["__status__"] = [
-            f"Computed: B1={state.get('bf1', 1.0):.4f}  "
-            f"B2={state.get('bf2', 1.0):.4f}"
-        ]
+            bf2 = _query_beaming_quiet(T2, logg2, band)
+            state["bf2"] = round(bf2, 4)
+            parts.append(f"B2={bf2:.4f}")
+        state["__status__"] = [f"Computed: {'  '.join(parts)}"]
     return state
 
 
