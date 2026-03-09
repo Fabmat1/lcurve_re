@@ -125,12 +125,14 @@ endif()
 
 add_executable(lcurve_re main.cpp)
 add_executable(lcurve_mcmc new_scripts/mcmc_solver.cpp)
+add_executable(lcurve_levmarq new_scripts/levmarq_solver.cpp)
 add_executable(lcurve_simplex new_scripts/simplex.cpp)
 add_executable(lcurve_visualize new_scripts/visualize.cpp)
 add_executable(test new_scripts/test.cpp)
 
 target_link_libraries(lcurve_re PRIVATE utilities)
 target_link_libraries(lcurve_mcmc PRIVATE utilities)
+target_link_libraries(lcurve_levmarq PRIVATE utilities)
 target_link_libraries(lcurve_simplex PRIVATE utilities)
 target_link_libraries(test PRIVATE utilities)
 target_link_libraries(lcurve_visualize  PRIVATE utilities)
@@ -140,11 +142,13 @@ find_package(nlohmann_json CONFIG REQUIRED)
 message(STATUS "nlohmann_json version: ${nlohmann_json_VERSION}")
 target_link_libraries(lcurve_re PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lcurve_mcmc PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(lcurve_levmarq PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(lcurve_simplex PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(test PRIVATE nlohmann_json::nlohmann_json)
 
 target_link_libraries(lcurve_re PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_mcmc PRIVATE Boost::filesystem Boost::iostreams)
+target_link_libraries(lcurve_levmarq PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_simplex PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(test PRIVATE Boost::filesystem Boost::iostreams)
 target_link_libraries(lcurve_visualize PRIVATE Boost::filesystem Boost::iostreams)
@@ -153,10 +157,7 @@ target_link_libraries(lcurve_visualize PRIVATE Boost::filesystem Boost::iostream
 include(GNUInstallDirs)
 
 # Install the main executables to bin directory
-install(TARGETS lcurve_re lcurve_mcmc lcurve_simplex
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        COMPONENT Runtime)
-install(TARGETS lcurve_visualize
+install(TARGETS lcurve_re lcurve_mcmc lcurve_simplex lcurve_levmarq lcurve_visualize
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         COMPONENT Runtime)
 
@@ -225,6 +226,7 @@ set(_LCURVE_ALL_TARGETS
     utilities
     lcurve_re
     lcurve_mcmc
+    lcurve_levmarq
     lcurve_simplex
     lcurve_visualize
     test)

@@ -38,8 +38,11 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
     double rl2 = 1. - Roche::xl12(mdl.q, mdl.spin2);
     if (r2 < 0)
         r2 = rl2;
-    else if (r2 > rl2)
+    else if (r2 > rl2){
+        std::cout << "r2: " << r2 << "rl2 :" << rl2 << std::endl;
         throw Lcurve_Error("light_curve_comp: the secondary star is larger than its Roche lobe!");
+    }
+        
 
     LDC ldc1 = mdl.get_ldc1();
     LDC ldc2 = mdl.get_ldc2();

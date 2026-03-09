@@ -857,8 +857,8 @@ def build_model_params(q, i, r1, r2, vs, t1, t2,
             "gdark_bolom2": "1",
             "mucrit1": "0",
             "mucrit2": "0",
-            "limb1": "Poly",
-            "limb2": "Poly",
+            "limb1": "Claret",
+            "limb2": "Claret",
             "mirror": "0",
             "add_disc": "0",
             "nrad": "40",
@@ -1877,7 +1877,61 @@ def make_pages():
         ],
     ))
 
-    # ── Page 10: Varied Parameters ──
+    # ── Page 10: Levenberg-Marquardt Settings ──
+    pages.append(FormPage(
+        "levmarq", "Levenberg-Marquardt Settings",
+        description="Settings for the LM least-squares solver.\n"
+                    "Leave blank for MINPACK-inspired defaults.\n"
+                    "These are only used by lcurve_levmarq, not the MCMC solver.",
+        fields=[
+            FormField("_sep_conv", "Convergence criteria", FieldType.SEPARATOR),
+            FormField("lm_max_iter", "Max iterations", FieldType.INT,
+                      default=200,
+                      help_text="MINPACK default: 200"),
+            FormField("lm_max_fev", "Max function evals", FieldType.INT,
+                      help_text="Blank = 200×(npar+1). Total LC+Jacobian evals."),
+            FormField("lm_ftol", "ftol (cost convergence)", FieldType.FLOAT,
+                      help_text="Blank = √macheps ≈ 1.5e-8. Relative cost reduction."),
+            FormField("lm_xtol", "xtol (param convergence)", FieldType.FLOAT,
+                      help_text="Blank = √macheps ≈ 1.5e-8. Relative param change."),
+            FormField("lm_gtol", "gtol (gradient convergence)", FieldType.FLOAT,
+                      default=0.0,
+                      help_text="0 = disabled. Gradient orthogonality test."),
+            FormField("_sep_damping", "Damping & trust region", FieldType.SEPARATOR),
+            FormField("lm_tau", "τ (initial λ scale)", FieldType.FLOAT,
+                      default=1e-3,
+                      help_text="λ₀ = τ·max(diag(JᵀJ)). Smaller = more Gauss-Newton."),
+            FormField("lm_factor", "Trust region factor", FieldType.FLOAT,
+                      default=100.0,
+                      help_text="MINPACK default: 100. Scales initial trust radius."),
+            FormField("_sep_fd", "Finite differences", FieldType.SEPARATOR),
+            FormField("lm_fd_step_rel", "Relative FD step", FieldType.FLOAT,
+                      help_text="Blank = ε^(1/4) ≈ 1.2e-4. Larger for noisy models."),
+            FormField("lm_fd_step_min", "Minimum FD step", FieldType.FLOAT,
+                      default=1e-10,
+                      help_text="Absolute floor for finite-difference step size."),
+            FormField("_sep_cont", "Prior continuation", FieldType.SEPARATOR),
+            FormField("lm_continuation", "Enable continuation?", FieldType.BOOL,
+                      default=True,
+                      help_text="Ramp priors from 0→1 so LC fit is established first."),
+            FormField("lm_continuation_stages", "Continuation stages", FieldType.INT,
+                      default=6,
+                      help_text="Num steps from 0→1 (e.g. 6 = 0, 0.2, 0.4, ..., 1.0)"),
+            FormField("lm_auto_balance_priors", "Auto-balance priors?", FieldType.BOOL,
+                      default=True,
+                      help_text="Scale priors so total penalty ≈ LC χ² at 1σ tension."),
+            FormField("lm_prior_balance_target", "Balance target", FieldType.FLOAT,
+                      default=1.0,
+                      help_text="Ratio of prior penalty to LC χ². 2.0 = priors 2× stronger."),
+            FormField("_sep_output", "Output", FieldType.SEPARATOR),
+            FormField("lm_log_path", "Iteration log file", FieldType.TEXT,
+                      default="lm_iter_log.txt"),
+            FormField("lm_verbose", "Verbose output?", FieldType.BOOL,
+                      default=True),
+        ],
+    ))
+
+    # ── Page 11: Varied Parameters ──
     pages.append(FormPage(
         "varied", "Parameters to Vary",
         description="Toggle parameters to vary in the MCMC.\n"
@@ -1899,7 +1953,7 @@ def make_pages():
         ],
     ))
 
-    # ── Page 11: Write Config ──
+    # ── Page 12: Write Config ──
     pages.append(FormPage(
         "write", "Write Configuration",
         description="Review and write the JSON configuration file.\n"
@@ -2237,10 +2291,29 @@ def _on_leave_write(state):
         "anneal_enabled": state.get("anneal_enabled", True),
         "anneal_T0": state.get("anneal_T0", 10.0) or 10.0,
         "anneal_steps": (state.get("mcmc_burn", 25000) or 25000) // 2,
+        # ── Levenberg-Marquardt settings ──
+        "lm_max_iter": state.get("lm_max_iter") or 200,
+        "lm_max_fev": state.get("lm_max_fev"),  # None → solver uses 200*(n+1)
+        "lm_ftol": state.get("lm_ftol"),         # None → solver uses √macheps
+        "lm_xtol": state.get("lm_xtol"),         # None → solver uses √macheps
+        "lm_gtol": state.get("lm_gtol") or 0.0,
+        "lm_tau": state.get("lm_tau") or 1e-3,
+        "lm_factor": state.get("lm_factor") or 100.0,
+        "lm_fd_step_rel": state.get("lm_fd_step_rel"),  # None → solver uses ε^(1/4)
+        "lm_fd_step_min": state.get("lm_fd_step_min") or 1e-10,
+        "lm_continuation": state.get("lm_continuation", True),
+        "lm_continuation_stages": state.get("lm_continuation_stages") or 6,
+        "lm_auto_balance_priors": state.get("lm_auto_balance_priors", True),
+        "lm_prior_balance_target": state.get("lm_prior_balance_target") or 1.0,
+        "lm_log_path": state.get("lm_log_path") or "lm_iter_log.txt",
+        "lm_verbose": state.get("lm_verbose", True),
         "prior_weight": prior_weight,
         "priors": priors,
         "model_parameters": mp,
     }
+
+    # Strip None values so C++ solver uses its compiled defaults
+    cfg = {k: v for k, v in cfg.items() if v is not None}
 
     with open(json_path, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -2272,6 +2345,17 @@ def _on_leave_write(state):
         )
     else:
         status.append("Priors: none (pure light-curve fit)")
+    
+    # LM settings summary
+    if state.get("lm_continuation", True):
+        n_stages = state.get("lm_continuation_stages") or 6
+        status.append(f"LM continuation: {n_stages} stages, "
+                      f"auto-balance={'on' if state.get('lm_auto_balance_priors', True) else 'off'}")
+    else:
+        status.append("LM continuation: off (priors applied at full weight)")
+
+    max_it = state.get("lm_max_iter") or 200
+    status.append(f"LM max iterations: {max_it}")
 
     state["_summary"] = f"Written to {json_path}"
     state["__status__"] = status
@@ -2505,6 +2589,23 @@ def _state_from_existing_config(cfg):
     if pw != 1.0:
         state["prior_weight"] = pw
 
+    # ── Levenberg-Marquardt settings ──
+    state["lm_max_iter"] = cfg.get("lm_max_iter", 200)
+    state["lm_max_fev"] = cfg.get("lm_max_fev")
+    state["lm_ftol"] = cfg.get("lm_ftol")
+    state["lm_xtol"] = cfg.get("lm_xtol")
+    state["lm_gtol"] = cfg.get("lm_gtol", 0.0)
+    state["lm_tau"] = cfg.get("lm_tau", 1e-3)
+    state["lm_factor"] = cfg.get("lm_factor", 100.0)
+    state["lm_fd_step_rel"] = cfg.get("lm_fd_step_rel")
+    state["lm_fd_step_min"] = cfg.get("lm_fd_step_min", 1e-10)
+    state["lm_continuation"] = cfg.get("lm_continuation", True)
+    state["lm_continuation_stages"] = cfg.get("lm_continuation_stages", 6)
+    state["lm_auto_balance_priors"] = cfg.get("lm_auto_balance_priors", True)
+    state["lm_prior_balance_target"] = cfg.get("lm_prior_balance_target", 1.0)
+    state["lm_log_path"] = cfg.get("lm_log_path", "lm_iter_log.txt")
+    state["lm_verbose"] = cfg.get("lm_verbose", True)
+
     return state
 
 def Helpers_parseThreeDoubles(s):
@@ -2596,8 +2697,11 @@ def main():
     json_path = app.state.get("json_path", "config.json")
     if Path(json_path).exists():
         print(f"\n{C}Configuration written to: {json_path}{Z}")
-        print(f"Run the MCMC solver with:")
-        print(f"  ./mcmc_solver {json_path}\n")
+        print(f"Run the solvers with:")
+        print(f"  {G}./lcurve_levmarq {json_path}{Z}    # quick point estimate")
+        print(f"  {G}./lcurve_mcmc    {json_path}{Z}    # full posterior sampling\n")
+        print(f"{D}Tip: run LM first to find a good starting point,")
+        print(f"then feed the result into MCMC for uncertainties.{Z}\n")
 
 
 if __name__ == "__main__":

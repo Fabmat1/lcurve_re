@@ -61,15 +61,19 @@ void Lcurve::set_star_grid(const Model& mdl, Roche::STAR which_star, bool fine,
     double rl1 = Roche::xl11(mdl.q, mdl.spin1);
     if(r1 < 0)
         r1 = rl1;
-    else if(r1 > rl1)
+    else if(r1 > rl1){
+        std::cout << "r1: " << r1 << "rl1 :" << rl1 << std::endl;
         throw Lcurve_Error("set_star_grid: the primary star is larger than its Roche lobe!");
+    }
+        
 
     double rl2 = 1.-Roche::xl12(mdl.q, mdl.spin2);
     if(r2 < 0)
         r2 = rl2;
-    else if(r2 > rl2)
+    else if(r2 > rl2){
+        std::cout << "r2: " << r2 << "rl2 :" << rl2 << std::endl;
         throw Lcurve_Error("set_star_grid: the secondary star is larger than its Roche lobe!");
-
+    }
     if(mdl.glens1 && which_star == Roche::SECONDARY && mdl.roche1 && mdl.eclipse2)
         throw Lcurve_Error("set_star_grid: cannot have gravitational lensing, eclipse and Roche lobe geometry at the same time");
 

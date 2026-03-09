@@ -128,9 +128,6 @@ inline double compute(double i_deg, double q, double vs, double r1,
     double lp_geometric = 0.0;
     double lp_observational = 0.0;
 
-    // ── Geometric (isotropic orientation) prior ──
-    if (c.use_sin_i_prior)
-        lp_geometric = std::log(sin_i);
 
     // ── K1 = vs·sin(i)·q/(1+q) ──
     if (c.has_K) {
@@ -229,7 +226,7 @@ inline std::pair<double, double> compute_decomposed(
     c_copy.prior_weight = 1.0;
 
     double lp_total_w1 = compute(i_deg, q, vs, r1, r2, t1, t2, c_copy);
-    double lp_geom = c.use_sin_i_prior ? std::log(sin_i) : 0.0;
+    double lp_geom = 0.0;
     double lp_obs = lp_total_w1 - lp_geom;
 
     return {lp_geom, lp_obs};
