@@ -33,6 +33,15 @@ from enum import Enum, auto
 import argparse
 import io
 import contextlib
+import os
+
+import re
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+def _strip_ansi(s):
+    """Remove ANSI escape sequences from a string."""
+    return _ANSI_RE.sub('', s)
 
 AUTOSAVE_PATH = Path(".lcurve_config_session.pkl")
 
@@ -387,7 +396,109 @@ def count_data_points(filepath):
 # ═══════════════════ Local Claret table queries ══════════════
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-CLARET_DIR = _PACKAGE_DIR / "data" / "claret_tables"
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+# Candidate locations for Claret tables, searched in order
+_CLARET_SEARCH_PATHS = [
+    _PACKAGE_DIR / "data" / "claret_tables",
+    _PACKAGE_DIR / "claret_tables",
+    _PACKAGE_DIR.parent / "data" / "claret_tables",
+    _PACKAGE_DIR.parent / "claret_tables",
+    Path.home() / ".lcurve" / "claret_tables",
+    Path("/usr/local/share/lcurve/claret_tables"),
+    Path("/usr/share/lcurve/claret_tables"),
+]
+
+# Known table filenames we expect to find
+_EXPECTED_TABLE_FILES = {
+    "ldc_ms_tess": "Claret2018_MS_TESS_LDC.dat",
+    "ldc_ms_kepler": "Claret2018_MS_KEPLER_LDC.dat",
+    "ldc_ms_multi": "Claret2011_MS_multifilter_LDC.dat",
+    "ldc_sd": "Claret2020_sd_LDC.dat",
+    "gdc_ms": "Claret2011_GDC_MS.dat",
+    "gdc_sd": "Claret2020_sd_GDC.dat",
+    "beaming": "Claret2020_beaming.dat",
+}
+
+# Will be set by _init_claret_dir() — called before TUI starts
+CLARET_DIR = _PACKAGE_DIR / "data" / "claret_tables"  # default fallback
+_CLARET_VALIDATED = False
+_CLARET_FOUND_FILES = []
+_CLARET_MISSING_FILES = []
+
+
+def _init_claret_dir(extra_path=None):
+    """Find and validate the Claret table directory. Call once at startup."""
+    global CLARET_DIR, _CLARET_VALIDATED, _CLARET_FOUND_FILES, _CLARET_MISSING_FILES
+
+    d, found, missing = _find_claret_dir(extra_path)
+    if d is not None:
+        CLARET_DIR = d
+        _CLARET_FOUND_FILES = found
+        _CLARET_MISSING_FILES = missing
+        _CLARET_VALIDATED = True
+    else:
+        _CLARET_FOUND_FILES = []
+        _CLARET_MISSING_FILES = list(_EXPECTED_TABLE_FILES.values())
+        _CLARET_VALIDATED = True
+
+def _find_claret_dir(extra_path=None):
+    """
+    Search for the Claret table directory.
+    Returns (Path, list_of_found_files, list_of_missing_files) or
+    (None, [], all_files) if no directory found.
+    """
+    candidates = list(_CLARET_SEARCH_PATHS)
+    if extra_path:
+        candidates.insert(0, Path(extra_path))
+
+    # Also check LCURVE_CLARET_DIR environment variable
+    env_dir = os.environ.get("LCURVE_CLARET_DIR")
+    if env_dir:
+        candidates.insert(0, Path(env_dir))
+
+    for d in candidates:
+        if d.is_dir():
+            found = []
+            missing = []
+            for label, fname in _EXPECTED_TABLE_FILES.items():
+                if (d / fname).exists():
+                    found.append(fname)
+                else:
+                    missing.append(fname)
+            if found:  # At least some tables exist here
+                return d, found, missing
+
+    all_files = list(_EXPECTED_TABLE_FILES.values())
+    return None, [], all_files
+
+
+def _validate_claret_dir(claret_dir):
+    """
+    Check which tables exist and return a diagnostic report.
+    Returns (found_dict, missing_dict) where keys are table labels.
+    """
+    found = {}
+    missing = {}
+    for label, fname in _EXPECTED_TABLE_FILES.items():
+        path = claret_dir / fname
+        if path.exists():
+            # Also check it has data rows
+            n_rows = 0
+            try:
+                with open(path) as f:
+                    for line in f:
+                        s = line.strip()
+                        if s and not s.startswith('#') and not s.startswith('!'):
+                            n_rows += 1
+                            if n_rows > 5:
+                                break
+                found[label] = (fname, n_rows)
+            except OSError:
+                missing[label] = fname
+        else:
+            missing[label] = fname
+    return found, missing
 
 # Filter-string mappings per table generation
 # Claret 2011 (A&A 529, A75) — MS multi-filter tables
@@ -399,9 +510,19 @@ _FILTER_2011 = {
     "Johnson-R": "R", "Johnson-I": "I",
 }
 
-# Claret 2020 (A&A 634, A93 / A&A 641, A157) — SD/WD tables & beaming
-_FILTER_2020 = {
+# Claret 2020 — filter strings differ between files!
+# SD LDC / GDC tables use shorter abbreviations
+_FILTER_2020_SD = {
     "TESS": "Te", "Kepler": "Ke",
+    "SDSS-u": "u'", "SDSS-g": "g'", "SDSS-r": "r'",
+    "SDSS-i": "i'", "SDSS-z": "z'",
+    "Johnson-U": "U", "Johnson-B": "B", "Johnson-V": "V",
+    "Johnson-R": "R", "Johnson-I": "I",
+}
+
+# Beaming table uses longer abbreviations for some filters
+_FILTER_2020_BEAMING = {
+    "TESS": "Tes", "Kepler": "Ke",
     "SDSS-u": "u'", "SDSS-g": "g'", "SDSS-r": "r'",
     "SDSS-i": "i'", "SDSS-z": "z'",
     "Johnson-U": "U", "Johnson-B": "B", "Johnson-V": "V",
@@ -501,26 +622,12 @@ def _get_ldc_spec(star_type, band):
     """
     Return (filepath, teff_col, logg_col, target_cols, filter_col,
             filter_value, teff_is_log) for an LDC query, or None.
-
-    File layouts
-    ────────────
-    Claret2018_MS_TESS_LDC.dat / _KEPLER_LDC.dat
-        vturb  Teff  [Fe/H]  logg  a1  a2  a3  a4  ...  method  band
-        col:   0     1       2      3   4   5   6   7
-
-    Claret2011_MS_multifilter_LDC.dat
-        vturb  Teff  [Fe/H]  logg  a1  a2  a3  a4  Filter  method  model
-        col:   0     1       2      3   4   5   6   7   8
-
-    Claret2020_sd_LDC.dat  (used for sd AND wd)
-        type  logg  Teff  Z  a1  a2  a3  a4  ...  ...  ...  Filter
-        col:  0     1     2  3   4   5   6   7                -1
     """
     if star_type == "ms":
         if band.upper() == "TESS":
             return (CLARET_DIR / "Claret2018_MS_TESS_LDC.dat",
                     1, 3, [4, 5, 6, 7], None, None, False)
-        if band in ("Kepler", "KEPLER") or band.upper() == "KEPLER":
+        if band.upper() in ("KEPLER", "KP"):
             return (CLARET_DIR / "Claret2018_MS_KEPLER_LDC.dat",
                     1, 3, [4, 5, 6, 7], None, None, False)
         filt = _FILTER_2011.get(band)
@@ -530,7 +637,7 @@ def _get_ldc_spec(star_type, band):
                 1, 3, [4, 5, 6, 7], 8, filt, False)
 
     if star_type in ("sd", "wd"):
-        filt = _FILTER_2020.get(band)
+        filt = _FILTER_2020_SD.get(band)
         if filt is None:
             return None
         return (CLARET_DIR / "Claret2020_sd_LDC.dat",
@@ -541,29 +648,38 @@ def _get_ldc_spec(star_type, band):
 
 # ── GDC table selection ──────────────────────────────────────
 
+# Nearest-band fallback for GDC queries when the exact band isn't
+# in the table.  Kepler Kp is a reasonable proxy for TESS and other
+# broad red/optical bands.
+_GDC_BAND_FALLBACK = {
+    "TESS": "Kepler",        # Kp is closest broad red band
+    "SDSS-z": "Johnson-I",   # z is close to I
+}
+
+
 def _get_gdc_spec(star_type, band):
     """
     Return table spec for a gravity-darkening query, or None.
 
-    File layouts
-    ────────────
-    Claret2011_GDC_MS.dat
-        vturb  log10(Teff)  [Fe/H]  logg  y  Filter  model
-        col:   0     1            2      3  4  5
-
-    Claret2020_sd_GDC.dat  (used for sd AND wd)
-        type  logg  Teff  Z  y  y2(?)  Filter
-        col:  0     1     2  3  4      5      -1
+    For MS stars, falls back to the nearest available band if the
+    exact band isn't in the Claret 2011 table (e.g. TESS → Kepler).
     """
     if star_type == "ms":
-        filt = _FILTER_2011.get(band)
+        # Try exact band first, then fallback
+        lookup_band = band
+        filt = _FILTER_2011.get(lookup_band)
+        if filt is None:
+            fallback = _GDC_BAND_FALLBACK.get(band)
+            if fallback is not None:
+                filt = _FILTER_2011.get(fallback)
+                lookup_band = fallback
         if filt is None:
             return None
         return (CLARET_DIR / "Claret2011_GDC_MS.dat",
-                1, 3, [4], 5, filt, True)          # teff_is_log=True
+                1, 3, [4], 5, filt, True)  # teff_is_log=True
 
     if star_type in ("sd", "wd"):
-        filt = _FILTER_2020.get(band)
+        filt = _FILTER_2020_SD.get(band)
         if filt is None:
             return None
         return (CLARET_DIR / "Claret2020_sd_GDC.dat",
@@ -582,7 +698,7 @@ def _get_beaming_spec(band):
         type  Filter  logg  Teff  Z  be
         col:  0       1     2     3  4  5
     """
-    filt = _FILTER_2020.get(band)
+    filt = _FILTER_2020_BEAMING.get(band)
     if filt is None:
         return None
     return (CLARET_DIR / "Claret2020_beaming.dat",
@@ -676,15 +792,21 @@ def query_beaming(T, logg, band):
     print(f"    {D}Beaming table miss — analytic B = {b:.4f}{Z}")
     return b
 
+
+
+
 def _query_beaming_quiet(T, logg, band):
-    """Query beaming with output suppressed (curses-safe)."""
-    with contextlib.redirect_stdout(io.StringIO()), \
-         contextlib.redirect_stderr(io.StringIO()):
+    """Query beaming with output captured. Returns (value, diagnostics)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            return query_beaming(T, logg, band)
-        except Exception:
+            val = query_beaming(T, logg, band)
+        except Exception as e:
             wl = BAND_WAVELENGTH.get(band, 786.5)
-            return _beam_factor_analytic(T, wl)
+            val = _beam_factor_analytic(T, wl)
+            buf.write(f"    Beaming query exception: {e}\n")
+    raw_lines = buf.getvalue().strip().splitlines()
+    return val, [_strip_ansi(l) for l in raw_lines]
 
 # ═══════════════════ Parameter builder ═══════════════════════
 
@@ -1098,6 +1220,7 @@ class FormApp:
         self.running = True
         self.message = ""
         self.message_color = 0
+        self._pending_leave = False  # True = on_leave ran, waiting for 2nd Enter
 
     @property
     def current_page(self):
@@ -1399,12 +1522,14 @@ class FormApp:
             elif ch == curses.KEY_LEFT:
                 if fld and fld.ftype == FieldType.CHOICE:
                     fld.choice_idx = (fld.choice_idx - 1) % len(fld.choices)
+                    self._pending_leave = False
                 elif _is_text_field(fld):
                     fld.cursor_pos = max(0, fld.cursor_pos - 1)
 
             elif ch == curses.KEY_RIGHT:
                 if fld and fld.ftype == FieldType.CHOICE:
                     fld.choice_idx = (fld.choice_idx + 1) % len(fld.choices)
+                    self._pending_leave = False
                 elif _is_text_field(fld):
                     fld.cursor_pos = min(len(fld.buf), fld.cursor_pos + 1)
 
@@ -1414,6 +1539,8 @@ class FormApp:
                     fld.buf = fld.buf[:p - 1] + fld.buf[p:]
                     fld.cursor_pos = p - 1
                     fld.error = ""
+                    self._pending_leave = False
+                    
 
             elif ch == curses.KEY_DC:  # Delete key
                 if _is_text_field(fld):
@@ -1421,10 +1548,12 @@ class FormApp:
                     if p < len(fld.buf):
                         fld.buf = fld.buf[:p] + fld.buf[p + 1:]
                     fld.error = ""
+                    self._pending_leave = False
                 elif fld and fld.editable:
                     fld.buf = ""
                     fld.cursor_pos = 0
                     fld.error = ""
+                    self._pending_leave = False
 
             elif ch == curses.KEY_HOME:
                 if _is_text_field(fld):
@@ -1488,6 +1617,7 @@ class FormApp:
                 if fld and fld.editable:
                     fld.buf = ""
                     fld.cursor_pos = 0
+                    self._pending_leave = False
 
             elif ch == "\x01":  # Ctrl+A: Home
                 if _is_text_field(fld):
@@ -1518,13 +1648,16 @@ class FormApp:
                     if fld.ftype == FieldType.BOOL:
                         if ch.lower() in ("y", "n"):
                             fld.buf = "Yes" if ch.lower() == "y" else "No"
+                            self._pending_leave = False
                         elif ch == " ":
                             fld.buf = ("No" if fld.buf.startswith("Y")
                                        else "Yes")
+                            self._pending_leave = False
                     elif fld.ftype == FieldType.CHOICE:
                         for ci, cv in enumerate(fld.choices):
                             if cv.lower().startswith(ch.lower()):
                                 fld.choice_idx = ci
+                                self._pending_leave = False
                                 break
                     else:
                         # Insert character at cursor position
@@ -1532,6 +1665,7 @@ class FormApp:
                         fld.buf = fld.buf[:p] + ch + fld.buf[p:]
                         fld.cursor_pos = p + 1
                         fld.error = ""
+                        self._pending_leave = False  # field changed, re-run on_leave
 
     def _go_next_page(self):
         page = self.current_page
@@ -1541,26 +1675,34 @@ class FormApp:
             return
 
         self._collect_state()
-        # Extract T/logg central values from measurement fields
         _extract_teff_logg(self.state)
 
-        # Run on_leave callback
-        if page.on_leave:
+        # Two-press logic: if the page has on_leave and we haven't run it yet,
+        # run it and show results, but DON'T advance. On the second press, advance.
+        if page.on_leave and not self._pending_leave:
             try:
                 self.state = page.on_leave(self.state)
                 self._distribute_state()
+                page.from_state(self.state)
                 page.status_lines = self.state.pop("__status__", [])
             except Exception as e:
                 self.message = f"Error: {e}"
                 self.message_color = 4
                 return
 
+            self._pending_leave = True
+            self.message = "Values computed — press Enter again to continue"
+            self.message_color = 2
+            self.save_session()
+            return
+
+        # Second press (or page has no on_leave): actually advance
+        self._pending_leave = False
         self.save_session()
 
         if self.page_idx < len(self.pages) - 1:
             self.page_idx += 1
             self.pages[self.page_idx].from_state(self.state)
-            # Run on_enter callback for the new page
             new_page = self.pages[self.page_idx]
             if new_page.on_enter:
                 try:
@@ -1575,12 +1717,12 @@ class FormApp:
             self.running = False
 
     def _go_prev_page(self):
+        self._pending_leave = False  # reset on backwards navigation
         if self.page_idx > 0:
             self._collect_state()
             _extract_teff_logg(self.state)
             self.page_idx -= 1
             self.pages[self.page_idx].from_state(self.state)
-            # Run on_enter for the page we're going back to
             page = self.pages[self.page_idx]
             if page.on_enter:
                 try:
@@ -2069,32 +2211,59 @@ def _suppress_stdout():
 
 
 def _query_ldc_quiet(T, logg, stype, band):
-    """Query LDC with all output suppressed."""
-    with contextlib.redirect_stdout(io.StringIO()), \
-         contextlib.redirect_stderr(io.StringIO()):
+    """Query LDC with output captured. Returns (values, diagnostics)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            return query_ldc(T, logg, stype, band)
-        except Exception:
-            return _default_ldc(T)
+            vals = query_ldc(T, logg, stype, band)
+        except Exception as e:
+            vals = _default_ldc(T)
+            buf.write(f"    LDC query exception: {e}\n")
+    raw_lines = buf.getvalue().strip().splitlines()
+    return vals, [_strip_ansi(l) for l in raw_lines]
 
 
 def _query_gdc_quiet(T, logg, stype, band):
-    """Query GDC with all output suppressed."""
-    with contextlib.redirect_stdout(io.StringIO()), \
-         contextlib.redirect_stderr(io.StringIO()):
+    """Query GDC with output captured. Returns (value, diagnostics)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            return query_gdc(T, logg, stype, band)
-        except Exception:
-            return 0.25 if T > 7500 else 0.08
+            val = query_gdc(T, logg, stype, band)
+        except Exception as e:
+            val = 0.25 if T > 7500 else 0.08
+            buf.write(f"    GDC query exception: {e}\n")
+    raw_lines = buf.getvalue().strip().splitlines()
+    return val, [_strip_ansi(l) for l in raw_lines]
+
 
 
 def _on_enter_ldc(state):
     """
     Query Claret on page entry for any empty LDC/GDC fields.
-    User-filled values are preserved.
+    User-filled values are preserved. Diagnostics surfaced in status.
     """
     band = state.get("band", "TESS")
     status = []
+
+    # ── Report table directory status ──
+    if not _CLARET_VALIDATED:
+        _init_claret_dir()
+
+    status.append(f"Table directory: {CLARET_DIR}")
+    if CLARET_DIR.is_dir():
+        if _CLARET_MISSING_FILES:
+            status.append(f"  Found {len(_CLARET_FOUND_FILES)} tables, "
+                          f"missing {len(_CLARET_MISSING_FILES)}:")
+            for mf in _CLARET_MISSING_FILES:
+                status.append(f"    ✗ {mf}")
+        else:
+            status.append(f"  ✓ All {len(_CLARET_FOUND_FILES)} table files present")
+    else:
+        status.append(f"  ✗ Directory does not exist!")
+        status.append(f"  Set LCURVE_CLARET_DIR env var or create the directory")
+        status.append(f"  Searched: {', '.join(str(p) for p in _CLARET_SEARCH_PATHS[:3])}...")
+
+    status.append("")
 
     for n in ("1", "2"):
         T = state.get(f"T{n}")
@@ -2102,7 +2271,6 @@ def _on_enter_ldc(state):
         stype = state.get(f"type{n}", "ms")
 
         if T is None:
-            # No temperature known — use rough defaults
             ldc_keys = [f"ldc{n}_{j}" for j in range(1, 5)]
             has_ldc = all(state.get(k) is not None for k in ldc_keys)
             if not has_ldc:
@@ -2116,28 +2284,84 @@ def _on_enter_ldc(state):
                 status.append(f"Star {n}: no T_eff — using GDC=0.15")
             continue
 
+        # ── Identify which table file is needed ──
+        ldc_spec = _get_ldc_spec(stype, band)
+        if ldc_spec is not None:
+            needed_file = ldc_spec[0]
+            if not needed_file.exists():
+                status.append(f"Star {n} ({stype}): NEED {needed_file.name}")
+                status.append(f"  File not found at: {needed_file}")
+            else:
+                status.append(f"Star {n} ({stype}): using {needed_file.name}")
+        else:
+            status.append(f"Star {n}: no LDC table defined for "
+                          f"type={stype}, band={band}")
+
         # LDC: query only if empty
         ldc_keys = [f"ldc{n}_{j}" for j in range(1, 5)]
         has_ldc = all(state.get(k) is not None for k in ldc_keys)
         if not has_ldc:
-            status.append(f"Star {n}: querying Claret LDC "
-                          f"(T={T:.0f}, {stype}, {band})...")
-            ldc = _query_ldc_quiet(T, logg, stype, band)
+            status.append(f"  Querying LDC "
+                          f"(T={T:.0f}, logg={logg}, {stype}, {band})...")
+            ldc, diag = _query_ldc_quiet(T, logg, stype, band)
+            used_fallback = any("default" in d.lower() or "not found" in d.lower()
+                                or "no matching" in d.lower()
+                                or "no ldc table" in d.lower() for d in diag)
             for j, v in enumerate(ldc, start=1):
                 if state.get(f"ldc{n}_{j}") is None:
                     state[f"ldc{n}_{j}"] = round(v, 4)
             status.append(f"  → [{', '.join(f'{v:.4f}' for v in ldc)}]")
+            if used_fallback:
+                status.append(f"  ⚠ FALLBACK — values are generic estimates!")
+                for d in diag:
+                    d = d.strip()
+                    if d:
+                        status.append(f"    {d}")
+            else:
+                status.append(f"  ✓ Matched from Claret table")
         else:
-            status.append(f"Star {n}: LDC already set (keeping)")
+            status.append(f"  LDC already set (keeping user values)")
 
-        # GDC: query only if empty
+        # GDC
+        # ── GDC — report which file, any band fallback, then query ──
+        gdc_spec = _get_gdc_spec(stype, band)
+        gdc_fallback_note = ""
+        if gdc_spec is not None:
+            needed_file = gdc_spec[0]
+            gdc_filter = gdc_spec[5]
+            if not needed_file.exists():
+                status.append(f"  GDC: NEED {needed_file.name} (not found)")
+            else:
+                # Check if we're using a fallback band
+                if stype == "ms" and _FILTER_2011.get(band) is None:
+                    fallback = _GDC_BAND_FALLBACK.get(band, "?")
+                    gdc_fallback_note = f" (using {fallback} as proxy for {band})"
+                    status.append(f"  GDC: {band} not in 2011 table, "
+                                  f"using {fallback} (filter='{gdc_filter}'){gdc_fallback_note}")
+        else:
+            status.append(f"  No GDC table defined for type={stype}, band={band}")
+
         if state.get(f"gd{n}") is None:
-            status.append(f"Star {n}: querying Claret GDC...")
-            gd = _query_gdc_quiet(T, logg, stype, band)
+            status.append(f"  Querying GDC...{gdc_fallback_note}")
+            gd, diag = _query_gdc_quiet(T, logg, stype, band)
+            used_fallback = any("default" in d.lower() or "not found" in d.lower()
+                                or "no matching" in d.lower()
+                                or "no gdc table" in d.lower()
+                                or "theoretical" in d.lower() for d in diag)
             state[f"gd{n}"] = round(gd, 4)
             status.append(f"  → y = {gd:.4f}")
+            if used_fallback:
+                status.append(f"  ⚠ FALLBACK — using theoretical estimate")
+                for d in diag:
+                    d = d.strip()
+                    if d:
+                        status.append(f"    {d}")
+            else:
+                status.append(f"  ✓ Matched from Claret table")
         else:
-            status.append(f"Star {n}: GDC already set (keeping)")
+            status.append(f"  GDC already set (keeping)")
+
+        status.append("")
 
     state["__status__"] = status
     return state
@@ -2145,6 +2369,7 @@ def _on_enter_ldc(state):
 
 def _on_leave_beaming(state):
     """Compute beaming factors from Claret table (or analytic fallback)."""
+    status = []
     if state.get("auto_beaming"):
         T1 = state.get("T1")
         T2 = state.get("T2")
@@ -2153,14 +2378,31 @@ def _on_leave_beaming(state):
         logg2 = state.get("logg2")
         parts = []
         if T1:
-            bf1 = _query_beaming_quiet(T1, logg1, band)
+            bf1, diag = _query_beaming_quiet(T1, logg1, band)
             state["bf1"] = round(bf1, 4)
             parts.append(f"B1={bf1:.4f}")
+            used_fallback = any("analytic" in d.lower() or "miss" in d.lower()
+                                or "not found" in d.lower() for d in diag)
+            if used_fallback:
+                status.append(f"⚠ Star 1 beaming: analytic fallback")
+            for d in diag:
+                d = d.strip()
+                if d:
+                    status.append(f"  {d}")
         if T2:
-            bf2 = _query_beaming_quiet(T2, logg2, band)
+            bf2, diag = _query_beaming_quiet(T2, logg2, band)
             state["bf2"] = round(bf2, 4)
             parts.append(f"B2={bf2:.4f}")
-        state["__status__"] = [f"Computed: {'  '.join(parts)}"]
+            used_fallback = any("analytic" in d.lower() or "miss" in d.lower()
+                                or "not found" in d.lower() for d in diag)
+            if used_fallback:
+                status.append(f"⚠ Star 2 beaming: analytic fallback")
+            for d in diag:
+                d = d.strip()
+                if d:
+                    status.append(f"  {d}")
+        status.insert(0, f"Computed: {'  '.join(parts)}")
+    state["__status__"] = status
     return state
 
 
@@ -2270,6 +2512,8 @@ def _on_leave_write(state):
         "sdisc": 1,
         "sspot": 1,
         "ssfac": 1,
+        "star1_type": state.get("type1", "ms"),
+        "star2_type": state.get("type2", "ms"),
         "mcmc_steps": state.get("mcmc_steps", 100000) or 100000,
         "mcmc_burn_in": state.get("mcmc_burn", 25000) or 25000,
         "mcmc_thin": state.get("mcmc_thin", 1) or 1,
@@ -2606,6 +2850,9 @@ def _state_from_existing_config(cfg):
     state["lm_log_path"] = cfg.get("lm_log_path", "lm_iter_log.txt")
     state["lm_verbose"] = cfg.get("lm_verbose", True)
 
+    # ── Star types ──
+    state["type1"] = cfg.get("star1_type", "ms")
+    state["type2"] = cfg.get("star2_type", "ms")
     return state
 
 def Helpers_parseThreeDoubles(s):
@@ -2637,7 +2884,32 @@ def main():
         "--no-resume", action="store_true",
         help="Ignore any auto-saved session"
     )
+    parser.add_argument(
+        "--claret-dir", default=None,
+        help="Path to directory containing Claret table files"
+    )
     args = parser.parse_args()
+
+    # ── Locate Claret tables ──
+    _init_claret_dir(args.claret_dir)
+    if CLARET_DIR.is_dir():
+        n_found = len(_CLARET_FOUND_FILES)
+        n_missing = len(_CLARET_MISSING_FILES)
+        print(f"{G}Claret tables: {CLARET_DIR}{Z}")
+        print(f"  {n_found} found, {n_missing} missing")
+        if _CLARET_MISSING_FILES:
+            for mf in _CLARET_MISSING_FILES:
+                print(f"  {Y}✗ {mf}{Z}")
+    else:
+        print(f"{R}⚠ Claret table directory not found!{Z}")
+        print(f"  Searched:")
+        for p in _CLARET_SEARCH_PATHS[:5]:
+            print(f"    {p}")
+        if args.claret_dir:
+            print(f"    {args.claret_dir}")
+        print(f"  {Y}Use --claret-dir /path/to/tables or set LCURVE_CLARET_DIR{Z}")
+        print(f"  {Y}LDC/GDC will use generic fallback values.{Z}")
+        print()
 
     state = {}
     resume_page = 0
