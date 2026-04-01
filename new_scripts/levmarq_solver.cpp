@@ -41,6 +41,7 @@
 #include "../src/new_helpers.h"
 #include "../src/new_subs.h"
 #include "../src/physical_prior.h"
+#include "../src/report_writer.h"
 
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -1293,45 +1294,13 @@ int main(int argc, char* argv[])
     for (int i = 0; i < npar; ++i)
         cout << "  " << names[i] << " = " << best_pars[i] << endl;
 
-    if (use_priors) {
-        double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
-        double bq  = get_par(q_idx,      model.q.value,      best_pars);
-        double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
-        double br  = get_par(r1_idx,     model.r1.value,     best_pars);
-        double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
-        double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
-        double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
-
-        cout << BRIGHT_CYAN << "Best-fit implied quantities:" << RESET << endl;
-        PhysicalPrior::print_implied(bi, bq, bv, br, br2, bt1, bt2, obs);
-
-        // Individual prior residuals
-        cout << BRIGHT_CYAN << "Individual prior residuals:" << RESET << endl;
-        vector<double> best_resid;
-        double best_chisq_lc;
-        vector<double> best_fit_final;
-        compute_residuals(best_pars, best_resid, best_chisq_lc, best_fit_final);
-        for (int k = 0; k < nprior; ++k) {
-            double r = best_resid[ndata + k];
-            string col = (std::abs(r) < 2.0) ? BRIGHT_GREEN
-                       : (std::abs(r) < 3.0) ? BRIGHT_YELLOW
-                       : BRIGHT_RED;
-            cout << "  " << setw(10) << left << prior_specs[k].name
-                 << "  r = " << col << fixed << setprecision(3)
-                 << r << RESET << "  (|r| = " << std::abs(r) << "σ)" << endl;
-        }
-    }
-
     // ─────────────────────────────────────────────────────────────────
     //  Covariance matrix and formal uncertainties
-    //
-    //  At the solution, the parameter covariance is approximately:
-    //    C = s² · (J^T J)^{-1}
-    //  where s² = ‖r‖² / (m - n)   (residual variance)
-    //
-    //  If priors are included, they are part of the residual, so the
-    //  covariance naturally reflects the prior constraints.
     // ─────────────────────────────────────────────────────────────────
+    ParamCovariance pcov;
+    bool has_covariance = false;
+    vector<double> sigma_par(npar, 0.0);
+    vector<vector<double>> corr_matrix;
     {
         model.set_param(best_pars);
         vector<double> best_resid_final;
@@ -1353,7 +1322,6 @@ int main(int argc, char* argv[])
         bool inv_ok = invert_spd(JtJ_final, cov);
 
         if (inv_ok) {
-            // Scale by s²
             for (int i = 0; i < npar; ++i)
                 for (int j = 0; j < npar; ++j)
                     cov[i][j] *= s2;
@@ -1374,7 +1342,28 @@ int main(int argc, char* argv[])
                      << " ± " << sigma[i] << endl;
             }
 
+            // Build ParamCovariance for error propagation
+            pcov.npar = npar;
+            pcov.cov  = cov;
+            for (int i = 0; i < npar; ++i) {
+                if      (names[i] == "iangle")         pcov.idx_iangle = i;
+                else if (names[i] == "q")              pcov.idx_q      = i;
+                else if (names[i] == "velocity_scale") pcov.idx_vs     = i;
+                else if (names[i] == "r1")             pcov.idx_r1     = i;
+                else if (names[i] == "r2")             pcov.idx_r2     = i;
+                else if (names[i] == "t1")             pcov.idx_t1     = i;
+                else if (names[i] == "t2")             pcov.idx_t2     = i;
+            }
+            has_covariance = true;
+            sigma_par = sigma;
+
             // Correlation matrix
+            corr_matrix.assign(npar, vector<double>(npar, 0.0));
+            for (int i = 0; i < npar; ++i)
+                for (int j = 0; j < npar; ++j)
+                    corr_matrix[i][j] = (sigma[i] > 0 && sigma[j] > 0)
+                        ? cov[i][j] / (sigma[i] * sigma[j]) : 0.0;
+
             if (npar <= 20) {
                 cout << "\n" << BRIGHT_CYAN << "Correlation matrix:"
                      << RESET << endl;
@@ -1388,9 +1377,7 @@ int main(int argc, char* argv[])
                 for (int i = 0; i < npar; ++i) {
                     cout << "  " << setw(int(mw)) << left << names[i];
                     for (int j = 0; j < npar; ++j) {
-                        double r = (sigma[i] > 0 && sigma[j] > 0)
-                            ? cov[i][j] / (sigma[i] * sigma[j])
-                            : 0.0;
+                        double r = corr_matrix[i][j];
                         string col = RESET;
                         if (i == j)           col = DIM;
                         else if (abs(r) > .7) col = BRIGHT_RED;
@@ -1402,20 +1389,18 @@ int main(int argc, char* argv[])
                 }
             }
 
-            // Store in config for output
+            // Store in config
             json cov_info;
             for (int i = 0; i < npar; ++i) {
-                cov_info["sigma"][names[i]]      = sigma[i];
-                cov_info["best_fit"][names[i]]   = (double)best_pars[i];
+                cov_info["sigma"][names[i]]    = sigma[i];
+                cov_info["best_fit"][names[i]] = (double)best_pars[i];
                 for (int j = 0; j < npar; ++j) {
                     string key = names[i] + "," + names[j];
                     cov_info["covariance"][key]   = cov[i][j];
-                    double r = (sigma[i] > 0 && sigma[j] > 0)
-                        ? cov[i][j] / (sigma[i] * sigma[j]) : 0.0;
-                    cov_info["correlations"][key] = r;
+                    cov_info["correlations"][key]  = corr_matrix[i][j];
                 }
             }
-            cov_info["reduced_chi2"] = best_chisq_lc_final / max(1, ndata - npar);
+            cov_info["reduced_chi2"]     = best_chisq_lc_final / max(1, ndata - npar);
             cov_info["residual_variance"] = s2;
             config["lm_results"] = cov_info;
 
@@ -1425,6 +1410,41 @@ int main(int argc, char* argv[])
                  << "  The solution may be at a boundary or the model"
                  << " may be ill-conditioned."
                  << RESET << endl;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    //  Implied physical quantities (with propagated errors)
+    // ─────────────────────────────────────────────────────────────────
+    vector<double> final_prior_resid;
+    if (use_priors) {
+        double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
+        double bq  = get_par(q_idx,      model.q.value,      best_pars);
+        double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
+        double br  = get_par(r1_idx,     model.r1.value,     best_pars);
+        double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
+        double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
+        double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
+
+        cout << BRIGHT_CYAN << "Best-fit implied quantities:" << RESET << endl;
+        PhysicalPrior::print_implied(bi, bq, bv, br, br2, bt1, bt2, obs,
+                                     has_covariance ? &pcov : nullptr);
+
+        // Individual prior residuals
+        cout << BRIGHT_CYAN << "Individual prior residuals:" << RESET << endl;
+        vector<double> best_resid_pr;
+        double best_chisq_pr;
+        vector<double> best_fit_pr;
+        compute_residuals(best_pars, best_resid_pr, best_chisq_pr, best_fit_pr);
+        for (int k = 0; k < nprior; ++k) {
+            double r = best_resid_pr[ndata + k];
+            final_prior_resid.push_back(r);
+            string col = (std::abs(r) < 2.0) ? BRIGHT_GREEN
+                       : (std::abs(r) < 3.0) ? BRIGHT_YELLOW
+                       : BRIGHT_RED;
+            cout << "  " << setw(10) << left << prior_specs[k].name
+                 << "  r = " << col << fixed << setprecision(3)
+                 << r << RESET << "  (|r| = " << std::abs(r) << "σ)" << endl;
         }
     }
 
@@ -1487,5 +1507,61 @@ int main(int argc, char* argv[])
         model, config,
         config["output_file_path"].get<string>() + ".json");
 
+    // ─────────────────────────────────────────────────────────────────
+    //  TeX / PDF fit report
+    // ─────────────────────────────────────────────────────────────────
+    {
+        ReportWriter::FitReportData rd;
+        rd.config_path  = config_file;
+        rd.converged    = converged;
+        rd.stop_reason  = stop_reason;
+        rd.iterations   = total_iter;
+        rd.func_evals   = fev_count;
+        rd.chisq_lc     = best_chisq;
+        rd.sum_sq       = best_sum_sq;
+        rd.ndata        = ndata;
+        rd.npar         = npar;
+        rd.nprior       = nprior;
+        rd.has_priors   = use_priors;
+        rd.has_covariance = has_covariance;
+        rd.obs          = obs;
+
+        for (int i = 0; i < npar; ++i) {
+            rd.par_names.push_back(names[i]);
+            rd.par_values.push_back(best_pars[i]);
+            rd.par_sigmas.push_back(sigma_par[i]);
+            rd.par_limits.push_back(limits[i]);
+        }
+
+        if (has_covariance)
+            rd.correlations = corr_matrix;
+
+        if (use_priors) {
+            double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
+            double bq  = get_par(q_idx,      model.q.value,      best_pars);
+            double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
+            double br  = get_par(r1_idx,     model.r1.value,     best_pars);
+            double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
+            double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
+            double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
+
+            rd.derived = PhysicalPrior::compute_derived_quantities(
+                bi, bq, bv, br, br2, bt1, bt2, obs,
+                has_covariance ? &pcov : nullptr);
+
+            for (int k = 0; k < nprior; ++k) {
+                rd.prior_names.push_back(prior_specs[k].name);
+                rd.prior_residuals.push_back(
+                    k < (int)final_prior_resid.size()
+                    ? final_prior_resid[k] : 0.0);
+            }
+        }
+
+        string report_tex = config.value("report_path",
+            ReportWriter::derive_report_path(config_file));
+        ReportWriter::write_tex_report(rd, report_tex);
+        ReportWriter::try_compile_pdf(report_tex);
+    }
+    
     return 0;
 }

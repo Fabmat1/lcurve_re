@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <tuple>
 #include <stdexcept>
+#include <vector>
+#include <sstream>
+#include <limits>
 
 struct ObservedConstraints {
     // ── Radial velocity semi-amplitudes ──
@@ -64,6 +67,33 @@ struct ObservedConstraints {
     // harder to violate.  A value of N_data/N_priors is a reasonable
     // "unit information" scaling.
     double prior_weight = 1.0;
+};
+
+struct ParamCovariance {
+    int idx_iangle = -1, idx_q = -1, idx_vs = -1;
+    int idx_r1 = -1, idx_r2 = -1, idx_t1 = -1, idx_t2 = -1;
+    std::vector<std::vector<double>> cov;
+    int npar = 0;
+};
+
+struct DerivedQuantities {
+    double K1 = 0, K2 = 0;
+    double R1 = 0, R2 = 0;
+    double M1 = 0, M2 = 0, M_total = 0;
+    double logg1 = 0, logg2 = 0;
+    double a_rsun = 0, a_km = 0;
+    double q = 0, i_deg = 0;
+    double t1 = 0, t2 = 0;
+
+    double K1_err = 0, K2_err = 0;
+    double R1_err = 0, R2_err = 0;
+    double M1_err = 0, M2_err = 0, M_total_err = 0;
+    double logg1_err = 0, logg2_err = 0;
+    double a_rsun_err = 0, a_km_err = 0;
+    double q_err = 0, i_err = 0;
+    double t1_err = 0, t2_err = 0;
+
+    bool has_errors = false;
 };
 
 namespace PhysicalPrior {
@@ -284,92 +314,213 @@ inline bool solve_consistent_params(
     return true;
 }
 
+enum DerivedTag {
+    DRV_K1 = 0, DRV_K2, DRV_R1, DRV_R2, DRV_M1, DRV_M2,
+    DRV_MTOTAL, DRV_LOGG1, DRV_LOGG2, DRV_A_RSUN
+};
+
+inline double eval_derived_tag(int tag, double i_deg, double q, double vs,
+                               double r1, double r2, double t1, double t2,
+                               double P_days)
+{
+    const double sin_i = std::sin(i_deg * DEG2RAD);
+    const double P_s   = P_days * DAY2SEC;
+    const double a_km  = vs * P_s / (2.0 * M_PI);
+    const double R1v   = r1 * a_km / RSUN_KM;
+    const double R2v   = (r2 > 0.0 && r2 < 1.0) ? r2 * a_km / RSUN_KM : 0.0;
+    const double Mt    = 4.0*M_PI*M_PI * a_km*a_km*a_km / (G_MSUN * P_s*P_s);
+    const double M1v   = Mt / (1.0 + q);
+    const double M2v   = q * M1v;
+
+    switch (tag) {
+        case DRV_K1:     return vs * sin_i * q / (1.0 + q);
+        case DRV_K2:     return vs * sin_i / (1.0 + q);
+        case DRV_R1:     return R1v;
+        case DRV_R2:     return R2v;
+        case DRV_M1:     return M1v;
+        case DRV_M2:     return M2v;
+        case DRV_MTOTAL: return Mt;
+        case DRV_LOGG1:
+            return (M1v > 0 && R1v > 0)
+                ? LOGG_SUN + std::log10(M1v) - 2.0*std::log10(R1v) : 0.0;
+        case DRV_LOGG2:
+            return (M2v > 0 && R2v > 0)
+                ? LOGG_SUN + std::log10(M2v) - 2.0*std::log10(R2v) : 0.0;
+        case DRV_A_RSUN: return a_km / RSUN_KM;
+        default: return 0.0;
+    }
+}
+
+inline double propagate_derived_error(
+    int tag, double i_deg, double q, double vs,
+    double r1, double r2, double t1, double t2,
+    double P_days, const ParamCovariance& pc)
+{
+    if (pc.npar == 0 || pc.cov.empty()) return 0.0;
+
+    const int cidx[7] = { pc.idx_iangle, pc.idx_q, pc.idx_vs,
+                          pc.idx_r1, pc.idx_r2, pc.idx_t1, pc.idx_t2 };
+    double v[7] = { i_deg, q, vs, r1, r2, t1, t2 };
+
+    const double f0 = eval_derived_tag(tag, v[0],v[1],v[2],v[3],v[4],v[5],v[6], P_days);
+    const double eps = std::sqrt(std::numeric_limits<double>::epsilon());
+    double grad[7] = {};
+
+    for (int k = 0; k < 7; ++k) {
+        if (cidx[k] < 0) continue;
+        double h = eps * std::abs(v[k]);
+        if (h < 1e-12) h = eps;
+        double save = v[k];
+        v[k] = save + h;
+        double fp = eval_derived_tag(tag, v[0],v[1],v[2],v[3],v[4],v[5],v[6], P_days);
+        v[k] = save;
+        grad[k] = (fp - f0) / h;
+    }
+
+    double var = 0.0;
+    for (int i = 0; i < 7; ++i) {
+        if (cidx[i] < 0) continue;
+        for (int j = 0; j < 7; ++j) {
+            if (cidx[j] < 0) continue;
+            var += grad[i] * grad[j] * pc.cov[cidx[i]][cidx[j]];
+        }
+    }
+    return (var > 0.0) ? std::sqrt(var) : 0.0;
+}
+
+inline DerivedQuantities compute_derived_quantities(
+    double i_deg, double q, double vs, double r1,
+    double r2, double t1, double t2,
+    const ObservedConstraints& c,
+    const ParamCovariance* pcov = nullptr)
+{
+    DerivedQuantities dq;
+    dq.i_deg = i_deg;  dq.q = q;  dq.t1 = t1;  dq.t2 = t2;
+
+    auto ev = [&](int tag){ return eval_derived_tag(tag, i_deg,q,vs,r1,r2,t1,t2, c.P_days); };
+    dq.K1      = ev(DRV_K1);
+    dq.K2      = ev(DRV_K2);
+    dq.R1      = ev(DRV_R1);
+    dq.R2      = ev(DRV_R2);
+    dq.M1      = ev(DRV_M1);
+    dq.M2      = ev(DRV_M2);
+    dq.M_total = ev(DRV_MTOTAL);
+    dq.logg1   = ev(DRV_LOGG1);
+    dq.logg2   = ev(DRV_LOGG2);
+    dq.a_rsun  = ev(DRV_A_RSUN);
+    dq.a_km    = dq.a_rsun * RSUN_KM;
+
+    if (pcov && pcov->npar > 0 && !pcov->cov.empty()) {
+        dq.has_errors = true;
+        auto pe = [&](int tag){
+            return propagate_derived_error(tag, i_deg,q,vs,r1,r2,t1,t2, c.P_days, *pcov);
+        };
+        dq.K1_err      = pe(DRV_K1);
+        dq.K2_err      = pe(DRV_K2);
+        dq.R1_err      = pe(DRV_R1);
+        dq.R2_err      = pe(DRV_R2);
+        dq.M1_err      = pe(DRV_M1);
+        dq.M2_err      = pe(DRV_M2);
+        dq.M_total_err = pe(DRV_MTOTAL);
+        dq.logg1_err   = pe(DRV_LOGG1);
+        dq.logg2_err   = pe(DRV_LOGG2);
+        dq.a_rsun_err  = pe(DRV_A_RSUN);
+        dq.a_km_err    = dq.a_rsun_err * RSUN_KM;
+
+        auto diag = [&](int idx) -> double {
+            if (idx >= 0 && idx < pcov->npar)
+                return std::sqrt(std::max(0.0, pcov->cov[idx][idx]));
+            return 0.0;
+        };
+        dq.q_err  = diag(pcov->idx_q);
+        dq.i_err  = diag(pcov->idx_iangle);
+        dq.t1_err = diag(pcov->idx_t1);
+        dq.t2_err = diag(pcov->idx_t2);
+    }
+    return dq;
+}
+
 // ─── Diagnostic: check & print self-consistency ──────────────────────
 inline void print_implied(double i_deg, double q, double vs, double r1,
                           double r2, double t1, double t2,
-                          const ObservedConstraints& c)
+                          const ObservedConstraints& c,
+                          const ParamCovariance* pcov = nullptr)
 {
-    const double sin_i = std::sin(i_deg * DEG2RAD);
-    const double P_s   = c.P_days * DAY2SEC;
-    const double a_km  = vs * P_s / (2.0 * M_PI);
-
-    double K_impl   = vs * sin_i * q / (1.0 + q);
-    double K2_impl  = vs * sin_i / (1.0 + q);
-    double R1_impl  = r1 * a_km / RSUN_KM;
-    double R2_impl  = (r2 > 0.0 && r2 < 1.0) ? r2 * a_km / RSUN_KM : 0.0;
-    double M_total  = 4.0*M_PI*M_PI * a_km*a_km*a_km / (G_MSUN * P_s*P_s);
-    double M1_impl  = M_total / (1.0 + q);
-    double M2_impl  = q * M1_impl;
+    DerivedQuantities dq = compute_derived_quantities(
+        i_deg, q, vs, r1, r2, t1, t2, c, pcov);
 
     auto fl = std::cout.flags();
     std::cout << std::fixed << std::setprecision(4);
 
+    auto pm = [](double err, int prec = 4) -> std::string {
+        if (err <= 0.0) return "";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(prec) << " ± " << err;
+        return oss.str();
+    };
+
     // ── K1 ──
-    std::cout << "  K1  (implied) = " << K_impl  << " km/s";
+    std::cout << "  K1  (implied) = " << dq.K1 << pm(dq.K1_err) << " km/s";
     if (c.has_K) std::cout << "   (obs " << c.K_obs
               << " -" << c.K_err_lo << "/+" << c.K_err_hi << ")";
     std::cout << "\n";
 
     // ── K2 ──
-    std::cout << "  K2  (implied) = " << K2_impl << " km/s";
+    std::cout << "  K2  (implied) = " << dq.K2 << pm(dq.K2_err) << " km/s";
     if (c.has_K2) std::cout << "   (obs " << c.K2_obs
               << " -" << c.K2_err_lo << "/+" << c.K2_err_hi << ")";
     std::cout << "\n";
 
     // ── R1 ──
-    std::cout << "  R1  (implied) = " << R1_impl << " R_sun";
+    std::cout << "  R1  (implied) = " << dq.R1 << pm(dq.R1_err) << " R_sun";
     if (c.has_R1) std::cout << "   (obs " << c.R1_obs
               << " -" << c.R1_err_lo << "/+" << c.R1_err_hi << ")";
     std::cout << "\n";
 
     // ── R2 ──
-    if (R2_impl > 0.0) {
-        std::cout << "  R2  (implied) = " << R2_impl << " R_sun";
+    if (dq.R2 > 0.0) {
+        std::cout << "  R2  (implied) = " << dq.R2 << pm(dq.R2_err) << " R_sun";
         if (c.has_R2) std::cout << "   (obs " << c.R2_obs
                   << " -" << c.R2_err_lo << "/+" << c.R2_err_hi << ")";
         std::cout << "\n";
     }
 
     // ── M1 ──
-    std::cout << "  M1  (implied) = " << M1_impl << " M_sun";
+    std::cout << "  M1  (implied) = " << dq.M1 << pm(dq.M1_err) << " M_sun";
     if (c.has_M1) std::cout << "   (obs " << c.M1_obs
               << " -" << c.M1_err_lo << "/+" << c.M1_err_hi << ")";
     std::cout << "\n";
 
     // ── M2 ──
-    std::cout << "  M2  (implied) = " << M2_impl << " M_sun";
+    std::cout << "  M2  (implied) = " << dq.M2 << pm(dq.M2_err) << " M_sun";
     if (c.has_M2) std::cout << "   (obs " << c.M2_obs
               << " -" << c.M2_err_lo << "/+" << c.M2_err_hi << ")";
     if (c.has_M2min) std::cout << "   (M2_min " << c.M2min_obs << ")";
     std::cout << "\n";
 
     // ── q ──
-    std::cout << "  q   (model)   = " << q;
+    std::cout << "  q   (model)   = " << dq.q << pm(dq.q_err);
     if (c.has_q) std::cout << "   (obs " << c.q_obs
               << " -" << c.q_err_lo << "/+" << c.q_err_hi << ")";
     std::cout << "\n";
 
     // ── M_total ──
-    std::cout << "  M_total       = " << M_total << " M_sun";
+    std::cout << "  M_total       = " << dq.M_total << pm(dq.M_total_err) << " M_sun";
     if (c.has_Mtotal) std::cout << "   (obs " << c.Mtotal_obs
               << " -" << c.Mtotal_err_lo << "/+" << c.Mtotal_err_hi << ")";
     std::cout << "\n";
 
     // ── logg1 ──
-    if (M1_impl > 0.0 && R1_impl > 0.0) {
-        double logg1 = LOGG_SUN + std::log10(M1_impl)
-                     - 2.0 * std::log10(R1_impl);
-        std::cout << "  logg1         = " << logg1 << " dex";
+    if (dq.M1 > 0.0 && dq.R1 > 0.0) {
+        std::cout << "  logg1         = " << dq.logg1 << pm(dq.logg1_err) << " dex";
         if (c.has_logg1) std::cout << "   (obs " << c.logg1_obs
                   << " -" << c.logg1_err_lo << "/+" << c.logg1_err_hi << ")";
         std::cout << "\n";
     }
 
     // ── logg2 ──
-    if (M2_impl > 0.0 && R2_impl > 0.0) {
-        double logg2 = LOGG_SUN + std::log10(M2_impl)
-                     - 2.0 * std::log10(R2_impl);
-        std::cout << "  logg2         = " << logg2 << " dex";
+    if (dq.M2 > 0.0 && dq.R2 > 0.0) {
+        std::cout << "  logg2         = " << dq.logg2 << pm(dq.logg2_err) << " dex";
         if (c.has_logg2) std::cout << "   (obs " << c.logg2_obs
                   << " -" << c.logg2_err_lo << "/+" << c.logg2_err_hi << ")";
         std::cout << "\n";
@@ -378,7 +529,7 @@ inline void print_implied(double i_deg, double q, double vs, double r1,
     // ── T1 ──
     if (t1 > 0.0) {
         std::cout << "  T1  (model)   = " << std::setprecision(0)
-                  << t1 << " K";
+                  << t1 << pm(dq.t1_err, 0) << " K";
         if (c.has_T1) std::cout << "   (obs " << c.T1_obs
                   << " -" << c.T1_err_lo << "/+" << c.T1_err_hi << ")";
         std::cout << "\n";
@@ -388,7 +539,7 @@ inline void print_implied(double i_deg, double q, double vs, double r1,
     // ── T2 ──
     if (t2 > 0.0) {
         std::cout << "  T2  (model)   = " << std::setprecision(0)
-                  << t2 << " K";
+                  << t2 << pm(dq.t2_err, 0) << " K";
         if (c.has_T2) std::cout << "   (obs " << c.T2_obs
                   << " -" << c.T2_err_lo << "/+" << c.T2_err_hi << ")";
         std::cout << "\n";
@@ -396,26 +547,26 @@ inline void print_implied(double i_deg, double q, double vs, double r1,
     }
 
     // ── Separation ──
-    std::cout << "  a             = " << a_km    << " km  =  "
-              << (a_km / RSUN_KM) << " R_sun\n";
+    std::cout << "  a             = " << dq.a_km << pm(dq.a_km_err)
+              << " km  =  " << dq.a_rsun << pm(dq.a_rsun_err) << " R_sun\n";
 
-    // Cross-check: M_total via vs³ (same formula, different path)
+    // ── Cross-check ──
+    const double P_s = c.P_days * DAY2SEC;
     double M_total_v = vs*vs*vs * P_s / (2.0 * M_PI * G_MSUN);
-    if (std::abs(M_total - M_total_v) > 1e-6 * M_total)
+    if (std::abs(dq.M_total - M_total_v) > 1e-6 * dq.M_total)
         std::cout << "  [BUG] M_total inconsistency: "
-                  << M_total << " vs " << M_total_v << "\n";
+                  << dq.M_total << " vs " << M_total_v << "\n";
 
-// Flag if K₁ is far from observed (accounting for error bars)
-    double K_max = vs * q / (1.0 + q);   // i = 90°
+    // ── K1 pull warning ──
+    double K_max = vs * q / (1.0 + q);
     if (c.has_K) {
-        double K_impl = vs * sin_i * q / (1.0 + q);
-        double K_sig  = (K_impl < c.K_obs) ? c.K_err_lo : c.K_err_hi;
+        double K_sig = (dq.K1 < c.K_obs) ? c.K_err_lo : c.K_err_hi;
         if (K_sig <= 0.0) K_sig = std::max(c.K_err_lo, c.K_err_hi);
         if (K_sig <= 0.0) K_sig = 0.1 * c.K_obs;
-        double K_pull = std::abs(K_impl - c.K_obs) / K_sig;
+        double K_pull = std::abs(dq.K1 - c.K_obs) / K_sig;
 
         if (K_pull > 3.0) {
-            std::cout << "  [WARNING] K1 implied = " << K_impl
+            std::cout << "  [WARNING] K1 implied = " << dq.K1
                       << " is " << std::fixed << std::setprecision(1)
                       << K_pull << "σ from K_obs = " << c.K_obs
                       << " (−" << c.K_err_lo << "/+" << c.K_err_hi << ")\n";
@@ -427,17 +578,16 @@ inline void print_implied(double i_deg, double q, double vs, double r1,
         }
     }
 
-    // Flag if K₂ is far from observed
+    // ── K2 pull warning ──
     if (c.has_K2) {
-        double K2_impl = vs * sin_i / (1.0 + q);
-        double K2_max  = vs / (1.0 + q);
-        double K2_sig  = (K2_impl < c.K2_obs) ? c.K2_err_lo : c.K2_err_hi;
+        double K2_max = vs / (1.0 + q);
+        double K2_sig = (dq.K2 < c.K2_obs) ? c.K2_err_lo : c.K2_err_hi;
         if (K2_sig <= 0.0) K2_sig = std::max(c.K2_err_lo, c.K2_err_hi);
         if (K2_sig <= 0.0) K2_sig = 0.1 * c.K2_obs;
-        double K2_pull = std::abs(K2_impl - c.K2_obs) / K2_sig;
+        double K2_pull = std::abs(dq.K2 - c.K2_obs) / K2_sig;
 
         if (K2_pull > 3.0) {
-            std::cout << "  [WARNING] K2 implied = " << K2_impl
+            std::cout << "  [WARNING] K2 implied = " << dq.K2
                       << " is " << std::fixed << std::setprecision(1)
                       << K2_pull << "σ from K2_obs = " << c.K2_obs
                       << " (−" << c.K2_err_lo << "/+" << c.K2_err_hi << ")\n";
