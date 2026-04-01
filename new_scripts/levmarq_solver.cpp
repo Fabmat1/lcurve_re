@@ -1402,6 +1402,45 @@ int main(int argc, char* argv[])
             }
             cov_info["reduced_chi2"]     = best_chisq_lc_final / max(1, ndata - npar);
             cov_info["residual_variance"] = s2;
+
+            // Implied physical quantities with propagated errors
+            if (use_priors) {
+                double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
+                double bq  = get_par(q_idx,      model.q.value,      best_pars);
+                double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
+                double br  = get_par(r1_idx,     model.r1.value,     best_pars);
+                double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
+                double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
+                double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
+
+                DerivedQuantities dq = PhysicalPrior::compute_derived_quantities(
+                    bi, bq, bv, br, br2, bt1, bt2, obs,
+                    has_covariance ? &pcov : nullptr);
+
+                json impl;
+                auto add = [&](const string& name, double val, double err) {
+                    impl[name]["value"] = val;
+                    impl[name]["sigma"] = err;
+                };
+                add("K1_km_s",       dq.K1,      dq.K1_err);
+                add("K2_km_s",       dq.K2,      dq.K2_err);
+                add("R1_Rsun",       dq.R1,      dq.R1_err);
+                add("R2_Rsun",       dq.R2,      dq.R2_err);
+                add("M1_Msun",       dq.M1,      dq.M1_err);
+                add("M2_Msun",       dq.M2,      dq.M2_err);
+                add("M_total_Msun",  dq.M_total, dq.M_total_err);
+                add("q",             dq.q,       dq.q_err);
+                add("iangle_deg",    dq.i_deg,   dq.i_err);
+                add("logg1_dex",     dq.logg1,   dq.logg1_err);
+                add("logg2_dex",     dq.logg2,   dq.logg2_err);
+                add("T1_K",          dq.t1,      dq.t1_err);
+                add("T2_K",          dq.t2,      dq.t2_err);
+                add("a_Rsun",        dq.a_rsun,  dq.a_rsun_err);
+                add("a_km",          dq.a_km,    dq.a_km_err);
+
+                cov_info["implied"] = impl;
+            }
+
             config["lm_results"] = cov_info;
 
         } else {
@@ -1562,6 +1601,6 @@ int main(int argc, char* argv[])
         ReportWriter::write_tex_report(rd, report_tex);
         ReportWriter::try_compile_pdf(report_tex);
     }
-    
+
     return 0;
 }
