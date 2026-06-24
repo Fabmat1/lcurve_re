@@ -723,7 +723,8 @@ int main(int argc, char* argv[])
         // ─────────────────────────────────────────────────────────────────
         auto compute_jacobian = [&](const Subs::Array1D<double>& pars,
                             const vector<double>& resid0,
-                            vector<vector<double>>& J) -> bool
+                            vector<vector<double>>& J,
+                            bool central = false) -> bool
         {
             J.assign(nresid, vector<double>(npar, 0.0));
 
@@ -733,6 +734,42 @@ int main(int argc, char* argv[])
                 double hj = dsteps[j];
                 if (!(hj > 0.0))
                     hj = fd_step_rel * std::abs(pars[j]) + fd_step_min;
+
+                // ── Central differences (used for the final covariance) ──
+                // O(h²) accurate vs the O(h) one-sided scheme below.  Only
+                // applied when both ±h stay inside the bounds; if either side
+                // (or an evaluation) fails we fall through to the one-sided
+                // code so all the existing robustness is preserved.
+                if (central
+                    && pars[j] + hj <= limits[j].second
+                    && pars[j] - hj >= limits[j].first) {
+                    double hc = hj;
+                    Subs::Array1D<double> p_plus  = pars;
+                    Subs::Array1D<double> p_minus = pars;
+                    vector<double> r_plus, r_minus, fit_tmp;
+                    double chisq_tmp;
+                    bool ok_c = false;
+                    for (int retry = 0; retry < 5; ++retry) {
+                        p_plus[j]  = pars[j] + hc;
+                        p_minus[j] = pars[j] - hc;
+                        bool okp = compute_residuals(p_plus,  r_plus,  chisq_tmp, fit_tmp);
+                        bool okm = compute_residuals(p_minus, r_minus, chisq_tmp, fit_tmp);
+                        if (okp && okm) { ok_c = true; break; }
+                        hc *= 0.5;
+                        if (pars[j] + hc > limits[j].second ||
+                            pars[j] - hc < limits[j].first) break;
+                    }
+                    if (ok_c) {
+                        double inv_h = 1.0 / (2.0 * hc);
+                        for (int i = 0; i < nresid; ++i) {
+                            double dr = (r_plus[i] - r_minus[i]) * inv_h;
+                            if (!std::isfinite(dr)) dr = 0.0;
+                            J[i][j] = dr;
+                        }
+                        continue;   // central difference done for this column
+                    }
+                    // central failed → fall through to the one-sided scheme
+                }
 
                 double pj_pert = pars[j] + hj;
                 double sign = 1.0;
@@ -1345,22 +1382,32 @@ int main(int argc, char* argv[])
                             best_chisq_lc_final, dummy_fit);
 
             vector<vector<double>> J_final;
-            compute_jacobian(best_pars, best_resid_final, J_final);
+            compute_jacobian(best_pars, best_resid_final, J_final, /*central=*/true);
+
+            // ── Error-bar rescaling (data block only) ────────────────────
+            // Rescale ONLY the photometric residual block so its reduced χ²
+            // equals 1, i.e. inflate the data error bars by √s2_lc.  The
+            // prior rows keep their face-value (user-balanced) weight, so the
+            // covariance is NOT globally multiplied by s2 afterwards.  With no
+            // priors this is identical to the old global-s2 scaling.
+            double s2_lc      = best_chisq_lc_final / std::max(1, ndata - npar);
+            double data_scale = (s2_lc > 0.0) ? 1.0 / std::sqrt(s2_lc) : 1.0;
+
+            vector<vector<double>> J_scaled = J_final;
+            for (int i = 0; i < ndata; ++i)
+                for (int j = 0; j < npar; ++j)
+                    J_scaled[i][j] *= data_scale;
 
             vector<vector<double>> JtJ_final;
             vector<double> Jtr_final;
-            compute_JtJ_Jtr(J_final, best_resid_final, JtJ_final, Jtr_final);
-
-            double s2 = best_sum_sq / std::max(1, nresid - npar);
+            compute_JtJ_Jtr(J_scaled, best_resid_final, JtJ_final, Jtr_final);
 
             vector<vector<double>> cov;
             bool inv_ok = invert_spd(JtJ_final, cov);
 
             if (inv_ok) {
-                for (int i = 0; i < npar; ++i)
-                    for (int j = 0; j < npar; ++j)
-                        cov[i][j] *= s2;
-
+                // No global s2 multiply: data block already rescaled above,
+                // prior block kept at face value.
                 cout << "\n" << BRIGHT_CYAN
                     << "Parameter uncertainties (1σ, from covariance):"
                     << RESET << endl;
@@ -1436,7 +1483,7 @@ int main(int argc, char* argv[])
                     }
                 }
                 cov_info["reduced_chi2"]     = best_chisq_lc_final / max(1, ndata - npar);
-                cov_info["residual_variance"] = s2;
+                cov_info["residual_variance"] = s2_lc;
 
                 // Implied physical quantities with propagated errors
                 if (use_priors) {
