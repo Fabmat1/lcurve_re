@@ -355,13 +355,29 @@ def _fallback_solve(i_deg, P_days, obs):
     return i_deg, q, vs, r1
 
 
-def estimate_r2(M2_est, P_days, vs):
-    """Rough r2 from a mass–radius relation."""
-    if M2_est is None or M2_est <= 0:
-        return 0.30
-    R2_Rsun = M2_est**0.8 if M2_est < 1 else M2_est**0.57
+def wd_radius_rsun(M_msun):
+    """Eggleton (zero-T) WD mass–radius relation; good to a few %."""
+    if M_msun <= 0 or M_msun >= 1.44:
+        return 0.012
+    mu = M_msun / 1.454
+    R = 0.0114 * math.sqrt(mu**(-2.0/3.0) - mu**(2.0/3.0)) \
+        * (1 + 3.5 * mu**(-2.0/3.0) + mu**(-1.0)) ** (-2.0/3.0)
+    return max(R, 0.003)
+
+def estimate_r2(M2_est, P_days, vs, star_type="ms"):
+    """Rough r2 = R2/a from a mass–radius relation."""
     a_km = vs * P_days * DAY2SEC / (2 * math.pi)
-    return max(0.01, min(0.95, R2_Rsun * RSUN_KM / a_km))
+
+    if star_type == "wd":
+        M = M2_est if (M2_est and M2_est > 0) else 0.6   # typical WD
+        R2_Rsun = wd_radius_rsun(M)
+    elif M2_est is None or M2_est <= 0:
+        # No mass info → assume low-mass MS companion
+        R2_Rsun = 0.3
+    else:
+        R2_Rsun = M2_est**0.8 if M2_est < 1 else M2_est**0.57
+
+    return max(1e-4, min(0.95, R2_Rsun * RSUN_KM / a_km))
 
 
 def _beam_factor_analytic(T, wl_nm):
@@ -1771,7 +1787,7 @@ def _run_solve(state):
         M2_est = m2_obs.value
     elif imp.get("M2"):
         M2_est = imp["M2"]
-    r2_opt = estimate_r2(M2_est, P, vs_opt)
+    r2_opt = estimate_r2(M2_est, P, vs_opt, star_type=state.get("type2", "ms"))
 
     r2_obs = state.get("obs_R2")
     if isinstance(r2_obs, Measurement) and r2_obs.value > 0:
@@ -2163,7 +2179,7 @@ def _on_leave_solve(state):
         M2_est = m2_obs.value
     elif imp.get("M2"):
         M2_est = imp["M2"]
-    r2_opt = estimate_r2(M2_est, P, vs_opt)
+    r2_opt = estimate_r2(M2_est, P, vs_opt, star_type=state.get("type2", "ms"))
 
     # Override r2 from obs
     r2_obs = state.get("obs_R2")

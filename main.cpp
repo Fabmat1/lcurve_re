@@ -70,7 +70,7 @@ int main(int argc, char* argv[]) {
 
     string sout = config["output_file_path"].get<string>();
     string device = config["plot_device"].get<string>();
-    if(device!="none" && device!="null"){
+    if(!Helpers::plotting_disabled(device)){
         Helpers::plot_model(data, fit, no_file, copy, device);
     }
 

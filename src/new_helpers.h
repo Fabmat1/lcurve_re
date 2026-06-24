@@ -11,6 +11,8 @@
 
 #include "lcurve_base/constants.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <cctype>
 using json = nlohmann::json;
 using namespace std;
 
@@ -30,11 +32,38 @@ std::string pparam_to_string(const Lcurve::Pparam &p) {
 }   // unnamed namespace
 
 namespace Helpers {
+    // Returns true when the configured plot device disables plotting
+    // entirely. The check is case-insensitive and ignores surrounding
+    // whitespace and quotes, so values such as "None", "NULL", "Disable",
+    // "off" or an empty string all switch gnuplot off completely.
+    inline bool plotting_disabled(string device) {
+        // strip surrounding whitespace and quote characters
+        auto is_trim = [](unsigned char c) {
+            return std::isspace(c) || c == '"' || c == '\'';
+        };
+        size_t b = 0, e = device.size();
+        while (b < e && is_trim((unsigned char)device[b])) ++b;
+        while (e > b && is_trim((unsigned char)device[e - 1])) --e;
+        device = device.substr(b, e - b);
+
+        std::transform(device.begin(), device.end(), device.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+
+        return device.empty()    || device == "none"     ||
+               device == "null"  || device == "disable"  ||
+               device == "disabled" || device == "off"   ||
+               device == "false" || device == "no";
+    }
+
     inline void plot_model(Lcurve::Data data,
                     vector<double> fit,
                     bool no_file,
                     Lcurve::Data copy,
                     const string &device) {
+        // If the device disables plotting, do nothing at all — never touch
+        // any gnuplot-iostream functionality.
+        if (plotting_disabled(device)) return;
+
         // 1) Compute x‐bounds and centering
         double x1 = data[0].time, x2 = data[0].time;
         for (size_t i = 1; i < data.size(); ++i) {

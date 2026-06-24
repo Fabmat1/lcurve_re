@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <atomic>
+#include <memory>
 
 using namespace std;
 using json = nlohmann::json;
@@ -155,9 +156,16 @@ int main(int argc, char* argv[])
     string device = config.value("plot_device", "none");
 
     // ── Gnuplot ──────────────────────────────────────────────────────
-    Gnuplot gp;
-    gp << "set terminal " + device + " title 'Live fitting plot'\n";
-    gp << "set grid\n";
+    // Only spin up gnuplot when plotting is actually requested. When the
+    // device disables plotting we never construct the Gnuplot object, so no
+    // gnuplot process is launched and no gnuplot-iostream functions run.
+    const bool plotting = !Helpers::plotting_disabled(device);
+    std::unique_ptr<Gnuplot> gp_ptr;
+    if (plotting) {
+        gp_ptr = std::make_unique<Gnuplot>();
+        *gp_ptr << "set terminal " + device + " title 'Live fitting plot'\n";
+        *gp_ptr << "set grid\n";
+    }
 
     // ── Identify parameter indices for the prior ─────────────────────
     int q_idx = -1, vs_idx = -1, r1_idx = -1, iangle_idx = -1;
@@ -1104,8 +1112,8 @@ int main(int argc, char* argv[])
         }
 
         // ── Live plot ────────────────────────────────────────────────
-        if (step % progress_interval == 0)
-            Helpers::plot_model_live(data, current_fit, no_file, copy, gp);
+        if (plotting && step % progress_interval == 0)
+            Helpers::plot_model_live(data, current_fit, no_file, copy, *gp_ptr);
 
     } // ═══ end MCMC loop ═══
 
@@ -1336,7 +1344,7 @@ int main(int argc, char* argv[])
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20);
-    if (device != "none" && device != "null")
+    if (plotting)
         Helpers::plot_model(data, best_fit, no_file, copy, device);
 
     string sout = config["output_file_path"].get<string>();
