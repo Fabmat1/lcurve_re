@@ -31,3 +31,8 @@ example/6429224373168869632.json
 example/j0658.json
 j0658chain_out.txt
 j0658output.txt
+build-reldbg/
+*.pkl
+config_report.*
+lm_iter_log.txt
+output.txt.json
