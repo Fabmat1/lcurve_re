@@ -38,10 +38,12 @@
 #include <memory>
 
 #include <nlohmann/json.hpp>
+#include <random>
 #include "../src/lcurve_base/lcurve.h"
 #include "../src/new_helpers.h"
 #include "../src/new_subs.h"
 #include "../src/physical_prior.h"
+#include "../src/chain_stats.h"
 #include "../src/report_writer.h"
 
 #include <sys/ioctl.h>
@@ -1373,6 +1375,7 @@ int main(int argc, char* argv[])
         bool has_covariance = false;
         vector<double> sigma_par(npar, 0.0);
         vector<vector<double>> corr_matrix;
+        double err_s2 = 1.0;   // χ²_red at the optimum, reused by the error MCMC
         {
             model.set_param(best_pars);
             vector<double> best_resid_final;
@@ -1392,6 +1395,7 @@ int main(int argc, char* argv[])
             // priors this is identical to the old global-s2 scaling.
             double s2_lc      = best_chisq_lc_final / std::max(1, ndata - npar);
             double data_scale = (s2_lc > 0.0) ? 1.0 / std::sqrt(s2_lc) : 1.0;
+            err_s2 = (s2_lc > 0.0) ? s2_lc : 1.0;
 
             vector<vector<double>> J_scaled = J_final;
             for (int i = 0; i < ndata; ++i)
@@ -1532,6 +1536,275 @@ int main(int argc, char* argv[])
                     << " may be ill-conditioned."
                     << RESET << endl;
             }
+        }
+
+        // ═════════════════════════════════════════════════════════════════
+        //  POSTERIOR ERROR REFINEMENT (short MCMC around the LM optimum)
+        //
+        //  The (JᵀJ)⁻¹ covariance is a linearisation: for bounded or
+        //  strongly nonlinear parameters (iangle, r1, q) it is symmetric
+        //  by construction and typically underestimates the true spread.
+        //  Here a short adaptive random-walk Metropolis chain samples the
+        //  actual posterior around the *unchanged* LM optimum:
+        //
+        //    log p = −0.5 · χ²_LC / s²  +  log-prior(weight 1)
+        //
+        //  with s² = χ²_red at the optimum (same rescaling the covariance
+        //  uses) and the physical priors at face value — one pseudo-
+        //  observation each, NOT the inflated fitting weight.  Asymmetric
+        //  1σ errors are the 15.9/84.1 percentile distances; derived
+        //  quantities are computed per sample so correlations survive.
+        // ═════════════════════════════════════════════════════════════════
+        bool error_mcmc_ok = false;
+        if (config.value("lm_error_mcmc", true))
+        {
+            const int emc_steps = config.value("lm_error_mcmc_steps", 8000);
+            const int emc_burn  = config.value("lm_error_mcmc_burn_in",
+                                               std::max(500, emc_steps / 4));
+
+            // Face-value priors for the posterior (weight overridable).
+            ObservedConstraints obs_err = obs;
+            obs_err.prior_weight =
+                config.value("lm_error_mcmc_prior_weight", 1.0);
+
+            // ── Proposal: Cholesky of the LM covariance, else diagonal ──
+            const double prop_sd = 2.38 / std::sqrt(double(npar));
+            vector<vector<double>> prop_L(npar, vector<double>(npar, 0.0));
+            bool use_chol = false;
+            if (has_covariance) {
+                vector<vector<double>> C = pcov.cov;
+                use_chol = true;
+                for (int i = 0; i < npar && use_chol; ++i) {
+                    for (int j = 0; j <= i; ++j) {
+                        double s = C[i][j];
+                        for (int k = 0; k < j; ++k)
+                            s -= prop_L[i][k] * prop_L[j][k];
+                        if (i == j) {
+                            if (s <= 0.0) { use_chol = false; break; }
+                            prop_L[i][j] = std::sqrt(s);
+                        } else {
+                            prop_L[i][j] = s / prop_L[j][j];
+                        }
+                    }
+                }
+            }
+            vector<double> diag_step(npar);
+            for (int j = 0; j < npar; ++j) {
+                diag_step[j] = (has_covariance && sigma_par[j] > 0.0)
+                                   ? sigma_par[j]
+                                   : dsteps[j];
+                if (!(diag_step[j] > 0.0)) diag_step[j] = 1e-6;
+            }
+
+            cout << "\n" << BRIGHT_CYAN
+                 << "─── Error-refinement MCMC (" << emc_steps
+                 << " steps, burn-in " << emc_burn << ", proposal: "
+                 << (use_chol ? "covariance Cholesky" : "diagonal")
+                 << ", s² = " << fixed << setprecision(3) << err_s2
+                 << ") ───" << RESET << endl;
+
+            mt19937 rng(config.value("seed", 42) + 1);
+            normal_distribution<> gauss(0.0, 1.0);
+            uniform_real_distribution<> uni(0.0, 1.0);
+
+            auto log_prior_at = [&](const Subs::Array1D<double>& p) {
+                if (!use_priors) return 0.0;
+                return PhysicalPrior::compute(
+                    get_par(iangle_idx, model.iangle.value, p),
+                    get_par(q_idx,      model.q.value,      p),
+                    get_par(vs_idx,     model.velocity_scale.value, p),
+                    get_par(r1_idx,     model.r1.value,     p),
+                    get_par(r2_idx,     model.r2.value,     p),
+                    get_par(t1_idx,     model.t1.value,     p),
+                    get_par(t2_idx,     model.t2.value,     p),
+                    obs_err);
+            };
+
+            Subs::Array1D<double> cur = best_pars;
+            vector<double> r_tmp, f_tmp;
+            double chi_cur;
+            bool ok0 = compute_residuals(cur, r_tmp, chi_cur, f_tmp);
+            double lp_cur = log_prior_at(cur);
+
+            vector<vector<double>> samples;
+            samples.reserve(std::max(0, emc_steps - emc_burn));
+
+            if (ok0) {
+                double log_scale = 0.0;   // Robbins-Monro global scale
+                int    batch = 0, batch_acc = 0, batch_n = 0;
+                long   accepted_total = 0;
+                const int batch_size = 50;
+
+                for (int step = 0; step < emc_steps; ++step) {
+                    const double sf = std::exp(log_scale);
+                    Subs::Array1D<double> prop = cur;
+                    if (use_chol) {
+                        vector<double> z(npar);
+                        for (int j = 0; j < npar; ++j) z[j] = gauss(rng);
+                        for (int i = 0; i < npar; ++i) {
+                            double off = 0.0;
+                            for (int j = 0; j <= i; ++j)
+                                off += prop_L[i][j] * z[j];
+                            prop[i] = cur[i] + sf * prop_sd * off;
+                        }
+                    } else {
+                        for (int j = 0; j < npar; ++j)
+                            prop[j] = cur[j]
+                                    + sf * prop_sd * diag_step[j] * gauss(rng);
+                    }
+                    // Reflect off boundaries
+                    for (int j = 0; j < npar; ++j) {
+                        double lo = limits[j].first, hi = limits[j].second;
+                        int bounces = 0;
+                        while ((prop[j] < lo || prop[j] > hi) && bounces < 20) {
+                            if (prop[j] < lo) prop[j] = 2*lo - prop[j];
+                            else              prop[j] = 2*hi - prop[j];
+                            ++bounces;
+                        }
+                        prop[j] = std::clamp(prop[j], lo, hi);
+                    }
+
+                    bool acc = false;
+                    double lp_prop = log_prior_at(prop);
+                    if (lp_prop > -1e29) {
+                        double chi_prop;
+                        if (compute_residuals(prop, r_tmp, chi_prop, f_tmp)) {
+                            const double log_alpha =
+                                -0.5 * (chi_prop - chi_cur) / err_s2
+                                + (lp_prop - lp_cur);
+                            if (log_alpha >= 0.0
+                                || std::log(uni(rng)) < log_alpha) {
+                                cur = prop;
+                                chi_cur = chi_prop;
+                                lp_cur  = lp_prop;
+                                acc = true;
+                            }
+                        }
+                    }
+
+                    if (step < emc_burn) {
+                        ++batch_n;
+                        if (acc) ++batch_acc;
+                        if (batch_n >= batch_size) {
+                            const double rate  = double(batch_acc) / batch_n;
+                            const double gamma =
+                                std::pow(1.0 + batch, -0.6);
+                            log_scale += gamma * (rate - 0.234);
+                            log_scale  = std::clamp(log_scale,
+                                                    std::log(1e-3),
+                                                    std::log(1e3));
+                            batch_acc = batch_n = 0;
+                            ++batch;
+                        }
+                    } else {
+                        if (acc) ++accepted_total;
+                        vector<double> row(npar);
+                        for (int j = 0; j < npar; ++j) row[j] = cur[j];
+                        samples.push_back(std::move(row));
+                    }
+
+                    if (verbose && step % 500 == 0)
+                        cout << "\r  " << step << "/" << emc_steps
+                             << "  (scale x" << fixed << setprecision(3)
+                             << std::exp(log_scale) << ")   " << flush;
+                }
+
+                const double acc_rate = samples.empty() ? 0.0
+                    : double(accepted_total) / samples.size();
+                cout << "\r  " << emc_steps << "/" << emc_steps
+                     << "  acceptance (post burn-in): "
+                     << fixed << setprecision(1) << 100.0 * acc_rate
+                     << "%          " << endl;
+
+                // A chain that never moved cannot yield percentiles.
+                error_mcmc_ok = samples.size() > 100 && acc_rate > 0.01;
+            } else {
+                cout << BRIGHT_YELLOW
+                     << "  Could not evaluate the optimum — error MCMC "
+                        "skipped." << RESET << endl;
+            }
+
+            if (error_mcmc_ok) {
+                vector<double> point(npar);
+                for (int j = 0; j < npar; ++j) point[j] = best_pars[j];
+
+                json fr = ChainStats::build_fit_results(
+                    "levmarq+mcmc",
+                    vector<string>(names.begin(), names.end()),
+                    point, samples, best_chisq, ndata, npar, err_s2);
+                fr["converged"]   = converged;
+                fr["stop_reason"] = stop_reason;
+                fr["iterations"]  = total_iter;
+
+                if (config.contains("true_period")) {
+                    const double P_days = config["true_period"].get<double>();
+                    auto dt = ChainStats::derived_traces(
+                        samples,
+                        iangle_idx, q_idx, vs_idx, r1_idx,
+                        r2_idx, t1_idx, t2_idx,
+                        model.iangle.value, model.q.value,
+                        model.velocity_scale.value, model.r1.value,
+                        model.r2.value, model.t1.value, model.t2.value,
+                        P_days);
+                    const double bi  = get_par(iangle_idx, model.iangle.value, best_pars);
+                    const double bq  = get_par(q_idx,      model.q.value,      best_pars);
+                    const double bv  = get_par(vs_idx,     model.velocity_scale.value, best_pars);
+                    const double br  = get_par(r1_idx,     model.r1.value,     best_pars);
+                    const double br2 = get_par(r2_idx,     model.r2.value,     best_pars);
+                    const double bt1 = get_par(t1_idx,     model.t1.value,     best_pars);
+                    const double bt2 = get_par(t2_idx,     model.t2.value,     best_pars);
+                    using namespace PhysicalPrior;
+                    const int tags[] = { DRV_K1, DRV_K2, DRV_R1, DRV_R2,
+                                         DRV_M1, DRV_M2, DRV_MTOTAL,
+                                         DRV_LOGG1, DRV_LOGG2, DRV_A_RSUN };
+                    vector<double> point_vals;
+                    for (int tag : tags)
+                        point_vals.push_back(eval_derived_tag(
+                            tag, bi, bq, bv, br, br2, bt1, bt2, P_days));
+                    ChainStats::add_implied(fr, dt, point_vals);
+                }
+                config["fit_results"] = fr;
+
+                cout << BRIGHT_CYAN
+                     << "Refined uncertainties (LM optimum, 16/84% MCMC):"
+                     << RESET << endl;
+                size_t mw = 0;
+                for (int j = 0; j < npar; ++j)
+                    mw = std::max(mw, names[j].size());
+                for (int j = 0; j < npar; ++j) {
+                    const double up = fr["sigma_up"][names[j]].get<double>();
+                    const double dn = fr["sigma_down"][names[j]].get<double>();
+                    cout << "  " << setw(int(mw)) << left << names[j]
+                         << " = " << setprecision(6) << best_pars[j]
+                         << "  +" << setprecision(3) << up
+                         << " / -" << dn;
+                    if (has_covariance && sigma_par[j] > 0.0)
+                        cout << DIM << "   (JᵀJ: ±" << sigma_par[j] << ")"
+                             << RESET;
+                    cout << endl;
+                }
+            }
+        }
+
+        // Fallback: expose the covariance errors through the same block so
+        // consumers always find fit_results when a σ exists at all.
+        if (!error_mcmc_ok && has_covariance) {
+            json fr;
+            fr["method"]        = "levmarq";
+            fr["converged"]     = converged;
+            fr["stop_reason"]   = stop_reason;
+            fr["iterations"]    = total_iter;
+            fr["n_samples"]     = 0;
+            fr["chi2_scale"]    = err_s2;
+            fr["best_chisq_lc"] = best_chisq;
+            fr["reduced_chi2"]  = best_chisq / std::max(1, ndata - npar);
+            for (int j = 0; j < npar; ++j) {
+                fr["best_pars"][names[j]]  = (double)best_pars[j];
+                fr["sigma"][names[j]]      = sigma_par[j];
+                fr["sigma_up"][names[j]]   = sigma_par[j];
+                fr["sigma_down"][names[j]] = sigma_par[j];
+            }
+            config["fit_results"] = fr;
         }
 
         // ─────────────────────────────────────────────────────────────────

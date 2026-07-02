@@ -31,6 +31,7 @@
 #include "../src/new_helpers.h"
 #include "../src/new_subs.h"
 #include "../src/physical_prior.h"
+#include "../src/chain_stats.h"
 
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -209,6 +210,20 @@ int main(int argc, char* argv[])
     int    anneal_steps   = config.value("anneal_steps",    burn_in / 2);
     if (anneal_steps < 0) anneal_steps = 0;
 
+    // ─────────────────────────────────────────────────────────────────
+    //  Data-error rescaling
+    //
+    //  Photometric error bars are rarely exact; a reduced χ² ≠ 1 at the
+    //  posterior mode means the raw-χ² posterior is too narrow (χ²ᵣ > 1)
+    //  or too wide (χ²ᵣ < 1).  At the burn-in boundary the χ² used in
+    //  the acceptance ratio is divided by s² = χ²_best/(N−k) — the same
+    //  rescaling the LM solver applies to its covariance — and kept
+    //  fixed from then on, so the recorded chain samples one well-
+    //  defined posterior.
+    // ─────────────────────────────────────────────────────────────────
+    bool   scale_data_errors = config.value("scale_data_errors", true);
+    double chi2_scale        = 1.0;
+
 
     // ANSI colours
     const string RESET        = "\033[0m";
@@ -348,6 +363,15 @@ int main(int argc, char* argv[])
         obs.P_days          = config.value("true_period", 1.0);
         obs.use_sin_i_prior = config.value("use_sin_i_prior", true);
         obs.prior_weight    = config.value("prior_weight", 1.0);
+        // The fitting-oriented prior_weight (often N_data/N_prior) is a
+        // convergence device: it shrinks the sampled posterior by ~√weight
+        // and makes the reported credible intervals meaningless.  For a
+        // statistically honest posterior each prior is one pseudo-
+        // observation → weight 1.  Callers that want percentile errors set
+        // mcmc_prior_weight; the plain prior_weight is kept as fallback so
+        // existing configs behave unchanged.
+        obs.prior_weight    = config.value("mcmc_prior_weight",
+                                           obs.prior_weight);
 
         for (auto& [p, v] : config["priors"].items()) {
             auto [val, err_lo, err_hi] =
@@ -724,6 +748,23 @@ int main(int argc, char* argv[])
                  << RESET << endl;
         }
 
+        // ── Fix the data-error rescale for the recorded chain ────────
+        if (step == burn_in && scale_data_errors)
+        {
+            const int ndata = static_cast<int>(data.size());
+            const int dof   = ndata - npar;
+            if (dof > 0 && best_chisq > 0.0) {
+                chi2_scale = best_chisq / dof;
+                cout << "\n" << BRIGHT_CYAN
+                     << "  Data-error rescale: χ²_red(best) = "
+                     << fixed << setprecision(3) << chi2_scale
+                     << " → sampling with χ²/" << setprecision(3)
+                     << chi2_scale << " (σ × "
+                     << setprecision(3) << std::sqrt(chi2_scale) << ")"
+                     << RESET << endl;
+            }
+        }
+
         // ── Burn-in boundary info ────────────────────────────────────
         if (step == burn_in && (adapt_enabled || adapt_covariance))
         {
@@ -1048,8 +1089,9 @@ int main(int argc, char* argv[])
         }
 
         // The chi² contribution is tempered; the prior is NOT.
-        // log α = -0.5 * Δχ² / T  +  Δ(log-prior)
-        double log_alpha = -0.5 * (chp - current_chisq) / temperature
+        // log α = -0.5 * Δχ² / (T·s²)  +  Δ(log-prior)
+        double log_alpha = -0.5 * (chp - current_chisq)
+                                / (temperature * chi2_scale)
                          + (log_prior_prop - log_prior_current);
 
         if (log_alpha >= 0.0 || log(uni(rng)) < log_alpha) {
@@ -1154,6 +1196,7 @@ int main(int argc, char* argv[])
     // ─────────────────────────────────────────────────────────────────
     //  Effective Sample Size
     // ─────────────────────────────────────────────────────────────────
+    double chain_min_ess = 1e30;
     {
         cout << BRIGHT_CYAN << "\nEffective sample sizes:" << RESET << endl;
         size_t mw = 0;
@@ -1167,6 +1210,7 @@ int main(int argc, char* argv[])
                 trace[s] = chain[s].pars[p];
             double ess = compute_ess(trace);
             min_ess = min(min_ess, ess);
+            chain_min_ess = min_ess;
 
             string col = BRIGHT_GREEN;
             if      (ess < 100)  col = BRIGHT_RED;
@@ -1312,6 +1356,120 @@ int main(int argc, char* argv[])
     }
 
     // ─────────────────────────────────────────────────────────────────
+    //  Posterior summary: median + 15.9/84.1-percentile errors
+    //
+    //  The reported solution is the posterior median (robust, invariant
+    //  under monotone reparametrisation), with asymmetric 1σ errors from
+    //  the percentiles.  Derived physical quantities are evaluated per
+    //  chain sample so their intervals carry all correlations.
+    // ─────────────────────────────────────────────────────────────────
+    Subs::Array1D<double> median_pars = best_pars;
+    {
+        vector<vector<double>> samples(chain.size(), vector<double>(npar));
+        for (size_t s = 0; s < chain.size(); ++s)
+            for (int j = 0; j < npar; ++j)
+                samples[s][j] = chain[s].pars[j];
+
+        vector<double> point(npar);
+        for (int j = 0; j < npar; ++j) {
+            vector<double> trace(chain.size());
+            for (size_t s = 0; s < chain.size(); ++s)
+                trace[s] = samples[s][j];
+            point[j] = ChainStats::percentile(trace, 0.5);
+            median_pars[j] = point[j];
+        }
+
+        // χ² at the median (fall back to the min-χ² point if the median
+        // parameter vector fails to evaluate, e.g. Roche overflow).
+        double chisq_med = best_chisq;
+        try {
+            vector<double> fit_med;
+            double wdm, chm, wnm, l1m, l2m, r1m, r2m;
+            model.set_param(median_pars);
+            Lcurve::light_curve_comp(model, data, scale, !no_file, false,
+                                     sfac, fit_med, wdm, chm, wnm,
+                                     l1m, l2m, r1m, r2m);
+            chisq_med = chm;
+        } catch (Lcurve::Lcurve_Error&) {
+            cout << BRIGHT_YELLOW
+                 << "  Median parameter vector failed to evaluate — "
+                    "reporting the min-χ² point instead."
+                 << RESET << endl;
+            median_pars = best_pars;
+            for (int j = 0; j < npar; ++j) point[j] = best_pars[j];
+        }
+
+        json fr = ChainStats::build_fit_results(
+            "mcmc", vector<string>(names.begin(), names.end()),
+            point, samples, chisq_med,
+            static_cast<int>(data.size()), npar, chi2_scale);
+        fr["converged"]   = chain_min_ess >= 100.0;
+        fr["min_ess"]     = chain_min_ess;
+        fr["stop_reason"] = "mcmc completed";
+        fr["iterations"]  = nsteps;
+        for (int j = 0; j < npar; ++j)
+            fr["min_chisq_pars"][names[j]] = best_pars[j];
+
+        // Derived quantities per sample (needs the true period).
+        if (config.contains("true_period")) {
+            const double P_days = config["true_period"].get<double>();
+            auto dt = ChainStats::derived_traces(
+                samples,
+                iangle_idx, q_idx, vs_idx, r1_idx, r2_idx, t1_idx, t2_idx,
+                model.iangle.value, model.q.value,
+                model.velocity_scale.value, model.r1.value,
+                model.r2.value, model.t1.value, model.t2.value,
+                P_days);
+
+            auto pick = [&](int idx, double fix) {
+                return idx >= 0 ? point[idx] : fix;
+            };
+            const double mi  = pick(iangle_idx, model.iangle.value);
+            const double mq  = pick(q_idx,      model.q.value);
+            const double mvs = pick(vs_idx,     model.velocity_scale.value);
+            const double mr1 = pick(r1_idx,     model.r1.value);
+            const double mr2 = pick(r2_idx,     model.r2.value);
+            const double mt1 = pick(t1_idx,     model.t1.value);
+            const double mt2 = pick(t2_idx,     model.t2.value);
+            vector<double> point_vals;
+            for (const auto& nm : dt.names) {
+                using namespace PhysicalPrior;
+                int tag = -1;
+                if      (nm == "K1_km_s")      tag = DRV_K1;
+                else if (nm == "K2_km_s")      tag = DRV_K2;
+                else if (nm == "R1_Rsun")      tag = DRV_R1;
+                else if (nm == "R2_Rsun")      tag = DRV_R2;
+                else if (nm == "M1_Msun")      tag = DRV_M1;
+                else if (nm == "M2_Msun")      tag = DRV_M2;
+                else if (nm == "M_total_Msun") tag = DRV_MTOTAL;
+                else if (nm == "logg1_dex")    tag = DRV_LOGG1;
+                else if (nm == "logg2_dex")    tag = DRV_LOGG2;
+                else if (nm == "a_Rsun")       tag = DRV_A_RSUN;
+                point_vals.push_back(eval_derived_tag(
+                    tag, mi, mq, mvs, mr1, mr2, mt1, mt2, P_days));
+            }
+            ChainStats::add_implied(fr, dt, point_vals);
+        }
+        config["fit_results"] = fr;
+
+        // ── Print summary table ──
+        cout << BRIGHT_CYAN << "\nPosterior summary (median, 16/84%):"
+             << RESET << endl;
+        size_t mw = 0;
+        for (int j = 0; j < npar; ++j) mw = max(mw, names[j].size());
+        for (int j = 0; j < npar; ++j) {
+            const double up = fr["sigma_up"][names[j]].get<double>();
+            const double dn = fr["sigma_down"][names[j]].get<double>();
+            cout << "  " << setw(int(mw)) << left << names[j]
+                 << " = " << setprecision(6) << point[j]
+                 << "  +" << setprecision(3) << up
+                 << " / -" << dn << endl;
+        }
+        cout << "  χ²(median) = " << fixed << setprecision(2)
+             << chisq_med << endl;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
     //  Write chain
     // ─────────────────────────────────────────────────────────────────
     {
@@ -1337,10 +1495,11 @@ int main(int argc, char* argv[])
     }
 
     // ─────────────────────────────────────────────────────────────────
-    //  Best-fit light curve, plot, output
+    //  Reported light curve, plot, output — evaluated at the posterior
+    //  median so the written model matches the reported parameters.
     // ─────────────────────────────────────────────────────────────────
     vector<double> best_fit;
-    model.set_param(best_pars);
+    model.set_param(median_pars);
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20);
