@@ -29,6 +29,11 @@ bool Roche::ingress_egress(double q, STAR star, double spin, double ffac, double
     double rref, pref;
     ref_sphere(q, star, spin, ffac, rref, pref);
 
+    return ingress_egress(q, star, spin, ffac, iangle, delta, r, ingress, egress, rref, pref);
+}
+
+bool Roche::ingress_egress(double q, STAR star, double spin, double ffac, double iangle, double delta, const Subs::Vec3& r, double& ingress, double& egress, double rref, double pref){
+
     double ri = Subs::deg2rad(iangle);
     double cosi = cos(ri), sini = sin(ri);
 
@@ -56,7 +61,7 @@ bool Roche::ingress_egress(double q, STAR star, double spin, double ffac, double
             double pin = phi, pout = phi1, pmid;
             while(fabs(pin-pout) > delta){
                 pmid = (pin+pout)/2.;
-                if(fblink(q, star, spin, ffac, ACC, set_earth(cosi, sini, pmid), r)){
+                if(fblink(q, star, spin, ACC, set_earth(cosi, sini, pmid), r, rref, pref)){
                     pin  = pmid;
                 }else{
                     pout = pmid;
@@ -70,7 +75,7 @@ bool Roche::ingress_egress(double q, STAR star, double spin, double ffac, double
             pout = phi2;
             while(fabs(pin-pout) > delta){
                 pmid = (pin+pout)/2.;
-                if(fblink(q, star, spin, ffac, ACC, set_earth(cosi, sini, pmid), r)){
+                if(fblink(q, star, spin, ACC, set_earth(cosi, sini, pmid), r, rref, pref)){
                     pin  = pmid;
                 }else{
                     pout = pmid;

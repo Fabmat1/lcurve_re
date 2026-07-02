@@ -223,10 +223,21 @@ namespace Roche {
     //! Is a point in eclipse or not?
     bool fblink(double q, STAR star, double spin, double ffac, double acc, const Subs::Vec3& earth, const Subs::Vec3& p);
 
+    //! Same, with the reference sphere (rref, pref) precomputed by the caller
+    bool fblink(double q, STAR star, double spin, double acc, const Subs::Vec3& earth, const Subs::Vec3& p, double rref, double pref);
+
     //! Computes ingress & egress phases in Roche geometry
     bool ingress_egress(double q, STAR star, double spin, double ffac,
                         double iangle, double delta, const Subs::Vec3& r,
                         double& ingress, double& egress);
+
+    //! Same, with the reference sphere (rref, pref) precomputed by the
+    //! caller (see ref_sphere); avoids recomputing it for every surface
+    //! element when looping over a grid.
+    bool ingress_egress(double q, STAR star, double spin, double ffac,
+                        double iangle, double delta, const Subs::Vec3& r,
+                        double& ingress, double& egress,
+                        double rref, double pref);
 
     //! Computes the position of a point on the Roche distorted surface
     void face(double q, STAR star, double spin, const Subs::Vec3& dirn,

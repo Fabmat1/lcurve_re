@@ -51,6 +51,7 @@ double Lcurve::comp_gravity1(const Model& mdl, const vector<Lcurve::Point>& star
     double sumfg=0., sumf=0;
 
     // Star 1.
+    #pragma omp parallel for schedule(static) reduction(+:sumfg,sumf)
     for(long unsigned int i=0; i<star1.size(); i++){
         const Point& pt = star1[i];
         // flux has built-in area factor
@@ -109,6 +110,7 @@ double Lcurve::comp_gravity2(const Model& mdl,
     double sumfg=0., sumf=0;
 
     // Star 2.
+    #pragma omp parallel for schedule(static) reduction(+:sumfg,sumf)
     for(long unsigned int i=0; i<star2.size(); i++){
         const Point& pt = star2[i];
         // flux has built-in area factor

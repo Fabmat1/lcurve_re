@@ -232,6 +232,14 @@ namespace Lcurve {
         //! To help applying mucrit
         bool see(double mu) const { return mu > this->mucrit; }
 
+        //! Coefficient / config accessors (used by the flat SIMD kernels)
+        double c1() const { return ldc1; }
+        double c2() const { return ldc2; }
+        double c3() const { return ldc3; }
+        double c4() const { return ldc4; }
+        double mucrit_val() const { return mucrit; }
+        LDCtype type() const { return ltype; }
+
     private:
         double ldc1;
         double ldc2;
@@ -240,6 +248,61 @@ namespace Lcurve {
         double mucrit;
         LDCtype ltype;
     };
+
+    //! Structure-of-arrays view of a star grid for the fast flux kernels
+    /** Faces are partitioned by their number of eclipse ranges so the hot
+     * summation loops are branch-free and vectorizable:
+     * [0,n0) no ranges (never eclipsed), [n0,n1) exactly one range
+     * (stored in in1/out1, indexed i-n0), [n1,n) two or more ranges
+     * (ragged storage moff/min_/mout_).
+     */
+    struct FlatGrid {
+        vector<double> dx, dy, dz; //!< outward direction of each face
+        vector<double> px, py, pz; //!< position of each face
+        vector<double> flux;       //!< brightness*area (promoted from float)
+        vector<double> in1, out1;  //!< single eclipse range for faces [n0,n1)
+        vector<int> moff;          //!< ragged offsets for faces [n1,n)
+        vector<double> min_, mout_; //!< ragged eclipse ranges
+        size_t n = 0, n0 = 0, n1 = 0;
+
+        //! Flattens a Point grid (call after fluxes and eclipses are final)
+        void build(const vector<Point> &pts);
+    };
+
+    //! Batch of (sub-)exposure phases to be summed over one FlatGrid
+    /** Collects every sub-exposure phase that uses a given grid so the
+     * expensive face sweep can be done once, blockwise, for all phases
+     * (much better cache locality than one sweep per data point).
+     */
+    struct PhaseBatch {
+        vector<double> ex, ey, ez; //!< earth vector per entry
+        vector<double> phin;       //!< phase normalised to [0,1)
+        vector<double> w;          //!< weight applied to the sum
+        vector<int> idx;           //!< data-point index for scatter-back
+
+        void clear() {
+            ex.clear(); ey.clear(); ez.clear();
+            phin.clear(); w.clear(); idx.clear();
+        }
+        size_t size() const { return idx.size(); }
+        void push(double ex_, double ey_, double ez_, double phin_,
+                  double w_, int idx_) {
+            ex.push_back(ex_); ey.push_back(ey_); ez.push_back(ez_);
+            phin.push_back(phin_); w.push_back(w_); idx.push_back(idx_);
+        }
+    };
+
+    //! Sums star-1 flux over a grid for every entry of a PhaseBatch.
+    //! out[k] receives the unweighted flux sum of entry k.
+    void flat_sum_star1_multi(const FlatGrid &g, const PhaseBatch &pb,
+                              const LDC &ldc, double beam, double spin,
+                              double VFAC, double XCOFM, double *out);
+
+    //! Same for star 2
+    void flat_sum_star2_multi(const FlatGrid &g, const PhaseBatch &pb,
+                              const LDC &ldc, double beam, double spin,
+                              double VFAC, double XCOFM,
+                              bool glens1, double rlens1, double *out);
 
     //! Model structure
     /** Defines the model to be used and which parameters are to be
@@ -528,6 +591,32 @@ namespace Lcurve {
                       const Ginterp &gint,
                       const vector<Lcurve::Point> &star2f,
                       const vector<Lcurve::Point> &star2c);
+
+    //! Fast SoA equivalent of comp_light (disc/edge/spot stay on the Point path)
+    double comp_light_flat(double iangle, const LDC &ldc1, const LDC &ldc2,
+                           double lin_limb_disc, double quad_limb_disc,
+                           double phase, double expose, int ndiv, double q,
+                           double beam_factor1, double beam_factor2,
+                           double spin1, double spin2, float vscale, bool glens1,
+                           double rlens1, const Ginterp &gint,
+                           const FlatGrid &star1f, const FlatGrid &star2f,
+                           const FlatGrid &star1c, const FlatGrid &star2c,
+                           const vector<Lcurve::Point> &disc,
+                           const vector<Lcurve::Point> &edge,
+                           const vector<Lcurve::Point> &spot);
+
+    //! Fast SoA equivalent of comp_star1
+    double comp_star1_flat(double iangle, const LDC &ldc1, double phase,
+                           double expose, int ndiv, double q, double beam_factor1,
+                           float vscale, const Ginterp &gint,
+                           const FlatGrid &star1f, const FlatGrid &star1c);
+
+    //! Fast SoA equivalent of comp_star2
+    double comp_star2_flat(double iangle, const LDC &ldc2, double phase,
+                           double expose, int ndiv, double q, double beam_factor2,
+                           float vscale, bool glens1, double rlens1,
+                           const Ginterp &gint,
+                           const FlatGrid &star2f, const FlatGrid &star2c);
 
     //! Computes flux from disc
     double comp_disc(double iangle, double lin_limb_disc, double quad_limb_disc,

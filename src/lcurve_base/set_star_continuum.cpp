@@ -36,15 +36,12 @@ void Lcurve::set_star_continuum(const Model& mdl,
     double rl2 = 1.-rl1;
     if(r2 < 0) r2 = rl2;
 
-    double mu, r, temp;
-    Subs::Vec3 vec;
     const Subs::Vec3 cofm2(1.,0.,0.);
 
     // First compute irradiation of star 1 by star 2. 'geom' is the
     // geometrical factor by which the radiation from star 2 is reduced
     // by the time it hits the element in terms of flux per unit area
     // compared to its level as it leaves star 2
-    double geom;
 
     // modify the gravity darkening coefficient to allow for two possibilities
     // the gravity darkening is implemented by modifying the temperature and
@@ -103,7 +100,10 @@ void Lcurve::set_star_continuum(const Model& mdl,
         uespot = Subs::Vec3(clong, slong, 0.);
     }
 
+    #pragma omp parallel for schedule(static)
     for(int i=0; i<nelem1; i++){
+        double mu, r, temp, geom;
+        Subs::Vec3 vec;
         vec = cofm2 - star1[i].posn;
         r = vec.length();
         mu = Subs::dot(star1[i].dirn, vec)/r;
@@ -236,7 +236,10 @@ void Lcurve::set_star_continuum(const Model& mdl,
         spot22 = Subs::Vec3(clat22*clong22, clat22*slong22, slat22);
     }
 
+    #pragma omp parallel for schedule(static)
     for(int i=0; i<nelem2; i++){
+        double mu, r, temp, geom;
+        Subs::Vec3 vec;
         vec = cofm1 - star2[i].posn;
         r   = vec.length();
         mu  = Subs::dot(star2[i].dirn,vec)/r;

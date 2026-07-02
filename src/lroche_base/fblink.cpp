@@ -28,6 +28,11 @@ bool Roche::fblink(double q, STAR star, double spin, double ffac, double acc, co
     double rref, pref;
     ref_sphere(q, star, spin, ffac, rref, pref);
 
+    return fblink(q, star, spin, acc, earth, p, rref, pref);
+}
+
+bool Roche::fblink(double q, STAR star, double spin, double acc, const Subs::Vec3& earth, const Subs::Vec3& p, double rref, double pref){
+
     Subs::Vec3 cofm;
     if(star == PRIMARY)
         cofm.set(0.,0.,0.);
@@ -84,7 +89,7 @@ bool Roche::fblink(double q, STAR star, double spin, double ffac, double acc, co
             std::cerr << "Line minimisation error inside fblink" << std::endl;
             std::cerr << err.what() << std::endl;
             std::cerr << "q = " << q << ", earth = " << earth << ", point = " << p << ", star = " << int(star)
-                      << ", ffac = " << ffac << ", acc = " << acc << std::endl;
+                      << ", rref = " << rref << ", acc = " << acc << std::endl;
             throw Subs::Subs_Error("fblink died");
         }
         return (flam < pref);

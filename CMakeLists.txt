@@ -71,6 +71,7 @@ set(SOURCES
         src/lcurve_base/lcurve.h
         src/lcurve_base/constants.h
         src/lcurve_base/comp_light.cpp
+        src/lcurve_base/comp_light_flat.cpp
         src/lcurve_base/set_star_grid.cpp
         src/lcurve_base/set_star_continuum.cpp
         src/lcurve_base/set_disc_grid.cpp
@@ -172,6 +173,23 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Debug/Release/RelWithDebInfo/MinSizeRel" FORCE)
 endif()
 
+# ─── RELEASE OPTIMISATION FLAGS ───────────────────────────────────
+# Applied per-target in lcurve_setup_target (Release config only).
+set(_RELEASE_FLAGS "")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    list(APPEND _RELEASE_FLAGS -march=native -funroll-loops)
+endif()
+
+# Link-time optimisation for Release builds (lets rpot & friends inline
+# across translation units). Applied per-target in lcurve_setup_target.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_msg)
+if(_ipo_ok)
+    message(STATUS "LTO enabled for Release configuration")
+else()
+    message(STATUS "LTO not supported: ${_ipo_msg}")
+endif()
+
 # ─── COMPILER-SPECIFIC WARNING FLAGS  ─────────────────────────────
 set(_COMMON_WARNINGS "")
 set(_WERROR "")
@@ -217,6 +235,12 @@ function(lcurve_setup_target TGT)
             $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
         target_link_options(${TGT} PRIVATE
             $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
+    endif()
+
+    # Link-time optimisation in Release
+    if(_ipo_ok)
+        set_property(TARGET ${TGT} PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
 endfunction()
 

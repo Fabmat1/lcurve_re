@@ -320,7 +320,33 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
             phi2 = Constants::TWOPI;
         }
 
-        for(int np=0; np<nphi; np++){
+        // Eclipse computation for one point. We calculate whether a point
+        // is eclipsed, and, if it is, its ingress and egress phases.
+        // Account for spherical or Roche geometry of other star. Since the
+        // stars are convex this calculation only accounts for eclipse by
+        // the OTHER star.
+        auto compute_eclipse = [&](const Subs::Vec3& pos) {
+            Lcurve::Point::etype eclipses;
+            double ingress, egress, lam1, lam2;
+            if(eclipse &&
+               ((which_star == Roche::PRIMARY &&
+                 ((roche2  && Roche::ingress_egress(q, Roche::SECONDARY, spin2, ffac2, iangle, delta, pos, ingress, egress, rref2, pref2)) ||
+                  (!roche2 && Roche::sphere_eclipse(cosi, sini, pos, cofm2, r2, ingress, egress, lam1, lam2)))) ||
+                (which_star == Roche::SECONDARY &&
+                 ((roche1  && Roche::ingress_egress(q, Roche::PRIMARY, spin1, ffac1, iangle, delta, pos, ingress, egress, rref1, pref1)) ||
+                  (!roche1 && Roche::sphere_eclipse(cosi, sini, pos, cofm1, r1, ingress, egress, lam1, lam2)))))){
+
+                eclipses.push_back(std::make_pair(ingress, egress));
+            }
+            return eclipses;
+        };
+
+        // The Roche potential is symmetric in the coordinate that carries
+        // sin(phi) (y if the pole points north, z otherwise) and the phi
+        // rings are symmetric about that plane, so only half of each ring
+        // needs the expensive Roche::face solve; the partner face is its
+        // mirror image. Eclipse phases are still computed per face.
+        for(int np=0; np < (nphi+1)/2; np++){
 
             try{
                 double phi  = phi1 + (phi2-phi1)*(np+0.5)/nphi;
@@ -337,7 +363,7 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
                 // Direction is now defined, so calculate radius and thus the
                 // position according to whether we are accounting for Roche
                 // geometry or not.
-                double rad, gravity, lam1, lam2, area, ingress, egress;
+                double rad, gravity, area;
 
                 if(which_star == Roche::PRIMARY && roche1){
                     Roche::face(q, Roche::PRIMARY, spin1, dirn, rref1, pref1, ACC, posn, dvec, rad, gravity);
@@ -361,26 +387,27 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
                 // Area, accounting for angle of face
                 area = ((phi2-phi1)/nphi*rad*sint)*((thi-tlo)/nl*rad)/dot(dirn, dvec);
 
-                // Eclipse computation. We calculate whether a point is
-                // eclipsed, and, if it is, its ingress and egress
-                // phases. Account for spherical or Roche geometry of other
-                // star. Since the stars are convex this calculation only
-                // accounts for eclipse by the OTHER star.
-                Lcurve::Point::etype eclipses;
+                star[off[nt]+np] = Lcurve::Point(posn, dvec, area, gravity/gref,
+                                                 compute_eclipse(posn));
 
-                if(eclipse &&
-                   ((which_star == Roche::PRIMARY &&
-                     ((roche2  && Roche::ingress_egress(q, Roche::SECONDARY, spin2, ffac2, iangle, delta, posn, ingress, egress)) ||
-                      (!roche2 && Roche::sphere_eclipse(cosi, sini, posn, cofm2, r2, ingress, egress, lam1, lam2)))) ||
-                    (which_star == Roche::SECONDARY &&
-                     ((roche1  && Roche::ingress_egress(q, Roche::PRIMARY, spin1, ffac1, iangle, delta, posn, ingress, egress)) ||
-                      (!roche1 && Roche::sphere_eclipse(cosi, sini, posn, cofm1, r1, ingress, egress, lam1, lam2)))))){
+                // Mirror partner: same radius, gravity and area; the
+                // sin(phi)-carrying component changes sign.
+                int np2 = nphi-1-np;
+                if(np2 != np){
+                    Subs::Vec3 dirn2 = dirn, posn2 = posn, dvec2 = dvec;
+                    if(npole){
+                        dirn2.y() = -dirn.y();
+                        posn2.y() = -posn.y();
+                        dvec2.y() = -dvec.y();
+                    }else{
+                        dirn2.z() = -dirn.z();
+                        posn2.z() = -posn.z();
+                        dvec2.z() = -dvec.z();
+                    }
 
-                    eclipses.push_back(std::make_pair(ingress, egress));
-
+                    star[off[nt]+np2] = Lcurve::Point(posn2, dvec2, area, gravity/gref,
+                                                      compute_eclipse(posn2));
                 }
-
-                star[off[nt]+np] = Lcurve::Point(posn, dvec, area, gravity/gref, eclipses);
             }
             catch(const Roche::Roche_Error& err){
                 if(!failed){

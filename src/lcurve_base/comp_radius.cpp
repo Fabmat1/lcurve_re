@@ -15,15 +15,16 @@
 
 double Lcurve::comp_radius1(const vector<Lcurve::Point>& star1){
 
-    Subs::Vec3 vec, cofm1(0.,0.,0.);
-    double sumsa=0., sumvol=0., r, rcosa;
+    const Subs::Vec3 cofm1(0.,0.,0.);
+    double sumsa=0., sumvol=0.;
 
     // Star 1.
+    #pragma omp parallel for schedule(static) reduction(+:sumsa,sumvol)
     for(long unsigned int i=0; i<star1.size(); i++){
         const Point& pt = star1[i];
-        vec = pt.posn-cofm1;
-        r = vec.length();
-        rcosa = Subs::dot(pt.dirn, vec);
+        Subs::Vec3 vec = pt.posn-cofm1;
+        double r = vec.length();
+        double rcosa = Subs::dot(pt.dirn, vec);
 
         // sum solid angle and 3x volume of all elements
         sumsa += pt.area*rcosa/std::pow(r,3);
@@ -41,15 +42,16 @@ double Lcurve::comp_radius1(const vector<Lcurve::Point>& star1){
 
 double Lcurve::comp_radius2(const vector<Lcurve::Point>& star2){
 
-    Subs::Vec3 vec, cofm2(1.,0.,0.);
-    double sumsa=0., sumvol=0., r, rcosa;
+    const Subs::Vec3 cofm2(1.,0.,0.);
+    double sumsa=0., sumvol=0.;
 
     // Star 2.
+    #pragma omp parallel for schedule(static) reduction(+:sumsa,sumvol)
     for(long unsigned int i=0; i<star2.size(); i++){
         const Point& pt = star2[i];
-        vec = pt.posn-cofm2;
-        r = vec.length();
-        rcosa = Subs::dot(pt.dirn, vec);
+        Subs::Vec3 vec = pt.posn-cofm2;
+        double r = vec.length();
+        double rcosa = Subs::dot(pt.dirn, vec);
 
         // sum solid angle and 3x volume of all elements
         sumsa += pt.area*rcosa/std::pow(r,3);
