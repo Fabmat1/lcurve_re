@@ -46,15 +46,26 @@ struct Summary {
 
 // Summarize one trace around a given point estimate.  When the estimate
 // lies outside the 16–84% interval (can happen when an optimizer sits on
-// a boundary the posterior piles up against), the one-sided distance is
-// clamped at zero — a genuinely one-sided interval.
+// a boundary the posterior piles up against), value-anchored distances
+// go negative on one side; clamping that side at zero would misreport a
+// genuinely uncertain quantity as exactly known on one side (and, since
+// sigma = (up+down)/2, pin the other side at exactly 2σ).  The summary
+// then falls back to the posterior widths about the median, which are
+// non-negative by construction and keep the true per-side spread.
 inline Summary summarize(const std::vector<double>& trace, double value)
 {
     Summary s;
-    s.value    = value;
-    s.median   = percentile(trace, 0.5);
-    s.err_up   = std::max(0.0, percentile(trace, 0.841) - value);
-    s.err_down = std::max(0.0, value - percentile(trace, 0.159));
+    s.value  = value;
+    s.median = percentile(trace, 0.5);
+    const double p_lo = percentile(trace, 0.159);
+    const double p_hi = percentile(trace, 0.841);
+    if (value >= p_lo && value <= p_hi) {
+        s.err_up   = p_hi - value;
+        s.err_down = value - p_lo;
+    } else {
+        s.err_up   = p_hi - s.median;
+        s.err_down = s.median - p_lo;
+    }
     return s;
 }
 
