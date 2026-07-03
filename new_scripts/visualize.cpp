@@ -106,6 +106,7 @@ struct Cli {
     int     fps     = 25;
     std::string out;
     bool    bare    = false;
+    std::string bg;
 };
 
 static void print_usage(const char* prog)
@@ -128,6 +129,8 @@ static void print_usage(const char* prog)
         "  --y2=F                Top    y-axis limit                 [ 1.0]\n"
         "  --width=F             Plot width  (px if >=64, else in*100) [8.0]\n"
         "  --height=F            Plot height (same logic; default: from aspect ratio)\n"
+        "  --bg=COLOR            Background colour or 'transparent' [default]\n"
+        "                        e.g. --bg=black  --bg=#1a1a2e  --bg=transparent\n"
         "  --bare                Hide axes, tics, borders, title    [off]\n"
         "  --no-bare             Show axes and decorations\n"
         "  --reverse             Dark background colour scheme       [on]\n"
@@ -198,6 +201,7 @@ int main(int argc, char* argv[]) try
         else if (a.rfind("--y2=", 0) == 0)       { cli.y2      = as<double>(opt_value(a).c_str(), "y2"); }
         else if (a.rfind("--width=", 0) == 0)    { cli.width   = as<double>(opt_value(a).c_str(), "width"); }
         else if (a.rfind("--height=", 0) == 0)   { cli.height  = as<double>(opt_value(a).c_str(), "height"); }
+        else if (a.rfind("--bg=", 0) == 0)        { cli.bg = opt_value(a); }
         else if (a == "--bare")                   { cli.bare = true; }
         else if (a == "--no-bare")                { cli.bare = false; }
         else if (a == "--reverse")                { cli.reverse = true; }
@@ -311,19 +315,36 @@ int main(int argc, char* argv[]) try
 
     const int delay_cs = std::max(1, 100 / std::max(1, cli.fps));
 
+    bool transparent = (cli.bg == "transparent");
+    std::string bg_spec;
+    if (!cli.bg.empty() && !transparent)
+        bg_spec = " background \"" + cli.bg + "\"";
+
     if (cli.video) {
         if (cli.vformat == "gif") {
-            gp << "set term gif animate optimize size " << Wpx << "," << Hpx
-               << " delay " << delay_cs << "\n";
+            gp << "set term gif animate optimize"
+               << (transparent ? " transparent" : "")
+               << " size " << Wpx << "," << Hpx
+               << " delay " << delay_cs
+               << bg_spec << "\n";
             gp << "set output " << std::quoted(cli.out) << "\n";
         } else {
-            gp << "set term pngcairo size " << Wpx << "," << Hpx << "\n";
+            gp << "set term pngcairo"
+               << (transparent ? " transparent" : "")
+               << " size " << Wpx << "," << Hpx
+               << bg_spec << "\n";
         }
     } else {
         double live_w = cli.width;
         double live_h = (cli.height > 0.0) ? cli.height
                          : cli.width * (cli.y2 - cli.y1) / (cli.x2 - cli.x1);
         gp << "set term " << cli.device << " size " << live_w << "," << live_h << "\n";
+    }
+
+    // For non-transparent solid backgrounds, fill the entire canvas
+    if (!cli.bg.empty() && !transparent) {
+        gp << "set object 1 rectangle from screen 0,0 to screen 1,1 behind "
+           << "fillcolor rgb \"" << cli.bg << "\" fillstyle solid noborder\n";
     }
 
     gp << "unset key\n";
