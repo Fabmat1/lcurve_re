@@ -1783,6 +1783,19 @@ int main(int argc, char* argv[])
                              << RESET;
                     cout << endl;
                 }
+                for (int j = 0; j < npar; ++j) {
+                    const double up = fr["sigma_up"][names[j]].get<double>();
+                    const double dn = fr["sigma_down"][names[j]].get<double>();
+                    if (up == 0.0 || dn == 0.0) {
+                        const double med = fr["median"][names[j]].get<double>();
+                        cout << BRIGHT_YELLOW
+                             << "  ⚠ " << names[j]
+                             << ": LM optimum lies outside the 16–84% posterior"
+                                " interval — posterior median " << med
+                             << " may be a better point estimate."
+                             << RESET << endl;
+                    }
+                }
             }
         }
 

@@ -44,14 +44,20 @@ struct Summary {
     double err_down = 0.0;   // 15.9th percentile → value (≥ 0)
 };
 
-// Summarize one trace around a given point estimate.  When the estimate
-// lies outside the 16–84% interval (can happen when an optimizer sits on
-// a boundary the posterior piles up against), value-anchored distances
-// go negative on one side; clamping that side at zero would misreport a
-// genuinely uncertain quantity as exactly known on one side (and, since
-// sigma = (up+down)/2, pin the other side at exactly 2σ).  The summary
-// then falls back to the posterior widths about the median, which are
-// non-negative by construction and keep the true per-side spread.
+// Summarize one trace around a given point estimate.  err_up/err_down are
+// always the value-anchored distances to the 84.1th / 15.9th posterior
+// percentiles, floored at zero.  Flooring (rather than the old fall-back to
+// median-anchored widths) keeps the quoted interval endpoints,
+//     [value − err_down, value + err_up],
+// equal to actual posterior percentiles (or the value itself), so they can
+// never leave the physically allowed region — the samples respect the
+// parameter limits, hence so do their percentiles.  This matters when the
+// optimizer sits on a boundary the posterior piles up against (e.g. i → 90°):
+// median-anchored widths shift the interval off the point estimate and can
+// push an endpoint past a hard limit.  A zero on one side is honest
+// information: it signals the point estimate lies at or outside that edge of
+// the credible interval.  Consumers wanting a posterior-centered summary can
+// still use the `median` field, which is reported unchanged.
 inline Summary summarize(const std::vector<double>& trace, double value)
 {
     Summary s;
@@ -59,13 +65,8 @@ inline Summary summarize(const std::vector<double>& trace, double value)
     s.median = percentile(trace, 0.5);
     const double p_lo = percentile(trace, 0.159);
     const double p_hi = percentile(trace, 0.841);
-    if (value >= p_lo && value <= p_hi) {
-        s.err_up   = p_hi - value;
-        s.err_down = value - p_lo;
-    } else {
-        s.err_up   = p_hi - s.median;
-        s.err_down = s.median - p_lo;
-    }
+    s.err_up   = std::max(0.0, p_hi - value);
+    s.err_down = std::max(0.0, value - p_lo);
     return s;
 }
 
