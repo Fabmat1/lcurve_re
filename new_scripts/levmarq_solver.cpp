@@ -1732,6 +1732,32 @@ int main(int argc, char* argv[])
                     "levmarq+mcmc",
                     vector<string>(names.begin(), names.end()),
                     point, samples, best_chisq, ndata, npar, err_s2);
+
+                // For a flat/offset chi² landscape the LM optimum can sit at
+                // or beyond the 16–84% posterior edge, flooring one side of
+                // its error to zero (ChainStats::summarize) — a sign the LM
+                // point is a poor stand-in for the posterior.  Re-anchor
+                // those parameters on the posterior median instead, and
+                // propagate the substitution into best_pars so every
+                // downstream consumer (implied quantities, the plotted
+                // light curve, the TeX report, lm_summary) reports the same
+                // adopted value that ASTRA receives via fit_results.
+                vector<int> adopted_median_idx;
+                for (int j = 0; j < npar; ++j) {
+                    const double up = fr["sigma_up"][names[j]].get<double>();
+                    const double dn = fr["sigma_down"][names[j]].get<double>();
+                    if (up <= 0.0 || dn <= 0.0) {
+                        point[j] = fr["median"][names[j]].get<double>();
+                        adopted_median_idx.push_back(j);
+                    }
+                }
+                if (!adopted_median_idx.empty()) {
+                    for (int j : adopted_median_idx) best_pars[j] = point[j];
+                    fr = ChainStats::build_fit_results(
+                        "levmarq+mcmc",
+                        vector<string>(names.begin(), names.end()),
+                        point, samples, best_chisq, ndata, npar, err_s2);
+                }
                 fr["converged"]   = converged;
                 fr["stop_reason"] = stop_reason;
                 fr["iterations"]  = total_iter;
@@ -1766,8 +1792,12 @@ int main(int argc, char* argv[])
                 config["fit_results"] = fr;
 
                 cout << BRIGHT_CYAN
-                     << "Refined uncertainties (LM optimum, 16/84% MCMC):"
-                     << RESET << endl;
+                     << "Refined uncertainties (16/84% MCMC"
+                     << (adopted_median_idx.empty()
+                             ? ", LM optimum"
+                             : ", posterior median where LM optimum "
+                               "fell outside the interval")
+                     << "):" << RESET << endl;
                 size_t mw = 0;
                 for (int j = 0; j < npar; ++j)
                     mw = std::max(mw, names[j].size());
@@ -1783,18 +1813,14 @@ int main(int argc, char* argv[])
                              << RESET;
                     cout << endl;
                 }
-                for (int j = 0; j < npar; ++j) {
-                    const double up = fr["sigma_up"][names[j]].get<double>();
-                    const double dn = fr["sigma_down"][names[j]].get<double>();
-                    if (up == 0.0 || dn == 0.0) {
-                        const double med = fr["median"][names[j]].get<double>();
-                        cout << BRIGHT_YELLOW
-                             << "  ⚠ " << names[j]
-                             << ": LM optimum lies outside the 16–84% posterior"
-                                " interval — posterior median " << med
-                             << " may be a better point estimate."
-                             << RESET << endl;
-                    }
+                for (int j : adopted_median_idx) {
+                    cout << BRIGHT_YELLOW
+                         << "  ⚠ " << names[j]
+                         << ": LM optimum lay outside the 16–84% posterior"
+                            " interval — adopted the posterior median "
+                         << setprecision(6) << best_pars[j]
+                         << " (and its percentile errors) instead."
+                         << RESET << endl;
                 }
             }
         }
