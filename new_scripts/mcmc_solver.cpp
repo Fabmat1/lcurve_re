@@ -160,7 +160,9 @@ int main(int argc, char* argv[])
     // Only spin up gnuplot when plotting is actually requested. When the
     // device disables plotting we never construct the Gnuplot object, so no
     // gnuplot process is launched and no gnuplot-iostream functions run.
-    const bool plotting = !Helpers::plotting_disabled(device);
+    const bool stream_plotting = Helpers::plotting_streamed(device);
+    const bool plotting = !Helpers::plotting_disabled(device) &&
+                          !stream_plotting;
     std::unique_ptr<Gnuplot> gp_ptr;
     if (plotting) {
         gp_ptr = std::make_unique<Gnuplot>();
@@ -195,6 +197,8 @@ int main(int argc, char* argv[])
     int burn_in           = config.value("mcmc_burn_in",     nsteps / 4);
     int thin              = max(1, config.value("mcmc_thin", 1));
     int progress_interval = config.value("progress_interval", 50);
+    int plot_update_interval = config.value("plot_update_interval",
+                                             progress_interval);
     int max_model_points  = config.value("max_model_points",  500);
 
     // ─────────────────────────────────────────────────────────────────
@@ -1154,8 +1158,17 @@ int main(int argc, char* argv[])
         }
 
         // ── Live plot ────────────────────────────────────────────────
-        if (plotting && step % progress_interval == 0)
-            Helpers::plot_model_live(data, current_fit, no_file, copy, *gp_ptr);
+        if ((plotting || stream_plotting) &&
+            step % max(1, plot_update_interval) == 0) {
+            if (stream_plotting)
+                Helpers::stream_model_frame(
+                    data, current_fit, no_file, copy,
+                    {{"phase", step < burn_in ? "burn-in" : "sampling"},
+                     {"step", step}, {"total", nsteps}});
+            else
+                Helpers::plot_model_live(data, current_fit, no_file, copy,
+                                         *gp_ptr);
+        }
 
     } // ═══ end MCMC loop ═══
 
@@ -1503,7 +1516,11 @@ int main(int argc, char* argv[])
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
                              lg10, lg20, rv10, rv20, false);
-    if (plotting)
+    if (stream_plotting)
+        Helpers::stream_model_frame(data, best_fit, no_file, copy,
+                                    {{"phase", "final"},
+                                     {"step", nsteps}, {"total", nsteps}});
+    else if (plotting)
         Helpers::plot_model(data, best_fit, no_file, copy, device);
 
     string sout = config["output_file_path"].get<string>();

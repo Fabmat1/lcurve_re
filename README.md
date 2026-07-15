@@ -57,7 +57,7 @@ All binaries live in `build/` after compilation.
 
   /* --- global switches -------------------------------------------- */
   "autoscale"         : true,        // let the code re-scale the model to χ² min
-  "plot_device"       : "qt",        // qt | wxt | x11 | pngcairo | none
+  "plot_device"       : "qt",        // qt | wxt | x11 | stream | none
   "seed"              : -123456,     // RNG seed  (negative = random)
 
   /* --- noise / fake data block ------------------------------------ */
@@ -91,6 +91,14 @@ All binaries live in `build/` after compilation.
    factors when `iscale=true` in the model) is fitted to minimise χ².  
 •  `plot_device : "none"` turns off all gnuplot calls – useful for
    headless clusters.
+•  `plot_device : "stream"` also avoids launching gnuplot and emits live,
+   line-delimited plot frames on standard output. Each frame starts with
+   `@@LCURVE_PLOT@@` and contains a compact `lcurve.plot.v1` JSON object with
+   `x`, `flux`, `error`, `model`, `residual`, and progress metadata. Parent
+   applications can strip these records from normal terminal output and draw
+   them with their native plotting widget. `plot_update_interval` controls
+   LM/MCMC frame cadence; `error_plot_update_interval` controls the short
+   error-refinement MCMC cadence.
 
 ---
 
@@ -119,7 +127,8 @@ lcurve_re/
 ## 5 Dependencies
 
 Run-time  
-• gnuplot (≥ 5.0) – only when `plot_device` ≠ "none"
+• gnuplot (≥ 5.0) – only for graphical `plot_device` values; `none` and
+  `stream` never launch it
 
 Build-time  
 • CMake ≥ 3.14  

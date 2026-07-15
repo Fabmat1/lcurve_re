@@ -32,12 +32,7 @@ std::string pparam_to_string(const Lcurve::Pparam &p) {
 }   // unnamed namespace
 
 namespace Helpers {
-    // Returns true when the configured plot device disables plotting
-    // entirely. The check is case-insensitive and ignores surrounding
-    // whitespace and quotes, so values such as "None", "NULL", "Disable",
-    // "off" or an empty string all switch gnuplot off completely.
-    inline bool plotting_disabled(string device) {
-        // strip surrounding whitespace and quote characters
+    inline string normalized_plot_device(string device) {
         auto is_trim = [](unsigned char c) {
             return std::isspace(c) || c == '"' || c == '\'';
         };
@@ -45,14 +40,72 @@ namespace Helpers {
         while (b < e && is_trim((unsigned char)device[b])) ++b;
         while (e > b && is_trim((unsigned char)device[e - 1])) --e;
         device = device.substr(b, e - b);
-
         std::transform(device.begin(), device.end(), device.begin(),
                        [](unsigned char c) { return std::tolower(c); });
+        return device;
+    }
+
+    // "stream" is a machine-readable plotting backend. It writes one
+    // compact JSON object per frame, prefixed so a parent process can remove
+    // it from the otherwise human-readable terminal output. No gnuplot
+    // process is created in this mode.
+    inline bool plotting_streamed(const string &device) {
+        const string normalized = normalized_plot_device(device);
+        return normalized == "stream" || normalized == "json-stream" ||
+               normalized == "astra";
+    }
+
+    // Returns true when the configured plot device disables plotting
+    // entirely. The check is case-insensitive and ignores surrounding
+    // whitespace and quotes, so values such as "None", "NULL", "Disable",
+    // "off" or an empty string all switch gnuplot off completely.
+    inline bool plotting_disabled(string device) {
+        device = normalized_plot_device(std::move(device));
 
         return device.empty()    || device == "none"     ||
                device == "null"  || device == "disable"  ||
                device == "disabled" || device == "off"   ||
                device == "false" || device == "no";
+    }
+
+    inline void stream_model_frame(const Lcurve::Data &data,
+                                   const vector<double> &fit,
+                                   bool no_file,
+                                   const Lcurve::Data &copy,
+                                   json metadata = json::object()) {
+        if (data.empty() || fit.size() < data.size()) return;
+
+        json frame;
+        frame["protocol"] = "lcurve.plot.v1";
+        frame["x"] = json::array();
+        frame["flux"] = json::array();
+        frame["error"] = json::array();
+        frame["model"] = json::array();
+        frame["residual"] = json::array();
+
+        double x1 = data.front().time, x2 = data.front().time;
+        for (const auto &point : data) {
+            x1 = std::min(x1, point.time);
+            x2 = std::max(x2, point.time);
+        }
+        double origin = 0.0;
+        if (x2 - x1 < 0.01 * std::abs((x1 + x2) / 2.0))
+            origin = x1;
+
+        for (size_t i = 0; i < data.size(); ++i) {
+            double sigma = (!no_file ? copy[i].ferr : data[i].ferr);
+            if (!(sigma > 0.0) || !std::isfinite(sigma)) sigma = 1e-3;
+            frame["x"].push_back(data[i].time - origin);
+            frame["flux"].push_back(data[i].flux);
+            frame["error"].push_back(sigma);
+            frame["model"].push_back(fit[i]);
+            frame["residual"].push_back((data[i].flux - fit[i]) / sigma);
+        }
+        if (!metadata.empty()) frame["meta"] = std::move(metadata);
+
+        // The marker is deliberately searchable anywhere in a byte stream:
+        // progress displays often end in '\r' instead of a newline.
+        cout << "@@LCURVE_PLOT@@" << frame.dump() << '\n' << flush;
     }
 
     inline void plot_model(Lcurve::Data data,
@@ -63,6 +116,11 @@ namespace Helpers {
         // If the device disables plotting, do nothing at all — never touch
         // any gnuplot-iostream functionality.
         if (plotting_disabled(device)) return;
+        if (plotting_streamed(device)) {
+            stream_model_frame(data, fit, no_file, copy,
+                               {{"phase", "final"}});
+            return;
+        }
 
         // 1) Compute x‐bounds and centering
         double x1 = data[0].time, x2 = data[0].time;

@@ -382,7 +382,9 @@ int main(int argc, char* argv[])
         // device disables plotting we never construct the Gnuplot object, so
         // no gnuplot process is launched and no gnuplot-iostream functions
         // are ever called.
-        const bool plotting = !Helpers::plotting_disabled(device);
+        const bool stream_plotting = Helpers::plotting_streamed(device);
+        const bool plotting = !Helpers::plotting_disabled(device) &&
+                              !stream_plotting;
         std::unique_ptr<Gnuplot> gp_ptr;
         if (plotting) {
             gp_ptr = std::make_unique<Gnuplot>();
@@ -439,6 +441,10 @@ int main(int argc, char* argv[])
         double fd_step_min = config.value("lm_fd_step_min", 1e-10);
         int    max_model_points = config.value("max_model_points", 500);
         int    progress_interval = config.value("progress_interval", 1);
+        int    plot_update_interval = config.value("plot_update_interval",
+                                                    progress_interval);
+        int    error_plot_update_interval = config.value(
+            "error_plot_update_interval", 50);
         bool   verbose     = config.value("lm_verbose", true);
 
         // ─────────────────────────────────────────────────────────────────
@@ -1345,10 +1351,19 @@ int main(int argc, char* argv[])
                         << "  " << col << status << RESET << endl;
                 }
 
-                if (plotting && chatty
-                    && stage_iter % max(1, progress_interval) == 0)
-                    Helpers::plot_model_live(data, current_fit, no_file,
-                                            copy, *gp_ptr);
+                if ((plotting || stream_plotting) && chatty &&
+                    stage_iter % max(1, plot_update_interval) == 0) {
+                    if (stream_plotting)
+                        Helpers::stream_model_frame(
+                            data, current_fit, no_file, copy,
+                            {{"phase", "lm"}, {"iteration", total_iter},
+                             {"stage", static_cast<int>(stage + 1)},
+                             {"stages", static_cast<int>(
+                                 continuation_schedule.size())}});
+                    else
+                        Helpers::plot_model_live(data, current_fit, no_file,
+                                                copy, *gp_ptr);
+                }
 
                 if (stage_converged) break;
                 if (fev_count - fev_start >= max_fev) {
@@ -1657,7 +1672,11 @@ int main(int argc, char* argv[])
         // optimum can therefore differ from the curve still on screen.
         // Refresh the existing window before covariance/error sampling so
         // its t0 always represents the solution reported below.
-        if (plotting)
+        if (stream_plotting)
+            Helpers::stream_model_frame(data, best_fit, no_file, copy,
+                                        {{"phase", "lm optimum"},
+                                         {"iteration", total_iter}});
+        else if (plotting)
             Helpers::plot_model_live(data, best_fit, no_file, copy, *gp_ptr);
 
         cout << "\n" << BRIGHT_CYAN
@@ -2000,9 +2019,9 @@ int main(int argc, char* argv[])
                     use_chol = cholesky_of(pcov.cov, prop_L);
 
                 Subs::Array1D<double> cur = start;
-                vector<double> r_tmp, f_tmp;
+                vector<double> r_tmp, fit_cur;
                 double chi_cur;
-                if (!compute_residuals(cur, r_tmp, chi_cur, f_tmp))
+                if (!compute_residuals(cur, r_tmp, chi_cur, fit_cur))
                     return false;
                 double lp_cur = log_prior_at(cur);
 
@@ -2045,7 +2064,8 @@ int main(int argc, char* argv[])
                     double lp_prop = log_prior_at(prop);
                     if (lp_prop > -1e29) {
                         double chi_prop;
-                        if (compute_residuals(prop, r_tmp, chi_prop, f_tmp)) {
+                        vector<double> fit_prop;
+                        if (compute_residuals(prop, r_tmp, chi_prop, fit_prop)) {
                             const double log_alpha =
                                 (-0.5 * (chi_prop - chi_cur)
                                  + (lp_prop - lp_cur)) / err_s2;
@@ -2054,6 +2074,7 @@ int main(int argc, char* argv[])
                                 cur = prop;
                                 chi_cur = chi_prop;
                                 lp_cur  = lp_prop;
+                                fit_cur = std::move(fit_prop);
                                 acc = true;
                             }
                         }
@@ -2080,6 +2101,18 @@ int main(int argc, char* argv[])
                         for (int j = 0; j < npar; ++j) row[j] = cur[j];
                         samples.push_back(std::move(row));
                         ++n_kept;
+                    }
+
+                    if ((plotting || stream_plotting) &&
+                        step % max(1, error_plot_update_interval) == 0) {
+                        if (stream_plotting)
+                            Helpers::stream_model_frame(
+                                data, fit_cur, no_file, copy,
+                                {{"phase", "error refinement"},
+                                 {"step", step}, {"total", total_steps}});
+                        else
+                            Helpers::plot_model_live(data, fit_cur, no_file,
+                                                    copy, *gp_ptr);
                     }
 
                     if (verbose && step % 500 == 0)
@@ -2386,7 +2419,11 @@ int main(int argc, char* argv[])
             Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                                     final_fit, wd0, chisq0, wn0,
                                     lg10, lg20, rv10, rv20, false);
-            if (plotting)
+            if (stream_plotting)
+                Helpers::stream_model_frame(
+                    data, final_fit, no_file, copy,
+                    {{"phase", "final"}, {"iteration", total_iter}});
+            else if (plotting)
                 Helpers::plot_model_live(data, final_fit, no_file, copy,
                                          *gp_ptr);
 
