@@ -21,7 +21,7 @@ static double compute_chisq(Lcurve::Model &model, const Lcurve::Data &data,
     vector<double> fit;
     double wd, chisq, wn, lg1, lg2, rv1, rv2;
     Lcurve::light_curve_comp(model, data, scale, have_data, false, sfac,
-                             fit, wd, chisq, wn, lg1, lg2, rv1, rv2);
+                             fit, wd, chisq, wn, lg1, lg2, rv1, rv2, false);
     return chisq;
 }
 
@@ -229,7 +229,7 @@ int main(int argc, char* argv[]) {
                              wd_out, chisq_out,
                              wn_out, lg1_out,
                              lg2_out, rv1_out,
-                             rv2_out);
+                             rv2_out, false);
     // Save chain-less results
     ofstream out(config["output_file_path"].get<string>());
     for (size_t i = 0; i < data.size(); ++i) {

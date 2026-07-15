@@ -132,7 +132,34 @@ All third-party headers are vendored – nothing is fetched at build time.
 
 ---
 
-## 6 Typical workflow
+## 6 CUDA acceleration
+
+When an NVIDIA CUDA compiler is installed, CMake builds optional GPU kernels
+for the batched stellar flux and whole Roche-grid/eclipsing calculation:
+
+```bash
+cmake -B build-cuda -DCMAKE_BUILD_TYPE=Release \
+  -DGNUPLOT_IOSTREAM_INCLUDE_DIR=/path/to/header/parent \
+  -DLCURVE_ENABLE_CUDA=ON
+cmake --build build-cuda -j$(nproc)
+
+LCURVE_CUDA=1 ./build-cuda/lcurve_mcmc config.json
+```
+
+CUDA is runtime opt-in; without `LCURVE_CUDA=1` the same binary uses the
+original CPU/OpenMP path. The accelerated path uses FP32 for per-face work and
+FP64 for accumulation and numerically sensitive tiny-star eclipse boundaries.
+`LCURVE_CUDA_PRECISION=double` selects FP64 flux arithmetic, while
+`LCURVE_CUDA_GRID=0` disables only whole-grid offload. If the driver or device
+is unavailable, execution falls back to the CPU automatically.
+
+Use `LCURVE_CUDA_GRID_VALIDATE=1` with the direct evaluator to compare every
+GPU eclipse interval against the CPU implementation for a model. This is a
+validation mode and is intentionally slow.
+
+---
+
+## 7 Typical workflow
 
 1.  Prepare a first-guess configuration  
     `cp examples/template.json myrun.json`  

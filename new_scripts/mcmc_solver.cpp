@@ -660,7 +660,7 @@ int main(int argc, char* argv[])
     double wd0, chisq0, wn0, lg10, lg20, rv10, rv20;
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              fit, wd0, chisq0, wn0,
-                             lg10, lg20, rv10, rv20);
+                             lg10, lg20, rv10, rv20, false);
 
     double current_chisq = chisq0;
     double best_chisq    = chisq0;
@@ -1062,7 +1062,7 @@ int main(int argc, char* argv[])
             light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
                                  fitp, wdp, chp, wnp,
                                  lg1p, lg2p, rv1p, rv2p,
-                                 max_model_points);
+                                 max_model_points, false);
         }
         catch (Lcurve::Lcurve_Error&) {
             model.set_param(current_pars);
@@ -1388,7 +1388,7 @@ int main(int argc, char* argv[])
             model.set_param(median_pars);
             Lcurve::light_curve_comp(model, data, scale, !no_file, false,
                                      sfac, fit_med, wdm, chm, wnm,
-                                     l1m, l2m, r1m, r2m);
+                                     l1m, l2m, r1m, r2m, false);
             chisq_med = chm;
         } catch (Lcurve::Lcurve_Error&) {
             cout << BRIGHT_YELLOW
@@ -1502,7 +1502,7 @@ int main(int argc, char* argv[])
     model.set_param(median_pars);
     Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                              best_fit, wd0, chisq0, wn0,
-                             lg10, lg20, rv10, rv20);
+                             lg10, lg20, rv10, rv20, false);
     if (plotting)
         Helpers::plot_model(data, best_fit, no_file, copy, device);
 

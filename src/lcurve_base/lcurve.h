@@ -4,6 +4,7 @@
 #define LCURVE_H
 
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "../new_subs.h"
@@ -264,6 +265,7 @@ namespace Lcurve {
         vector<int> moff;          //!< ragged offsets for faces [n1,n)
         vector<double> min_, mout_; //!< ragged eclipse ranges
         size_t n = 0, n0 = 0, n1 = 0;
+        std::uint64_t generation = 0; //!< changes whenever host data rebuilds
 
         //! Flattens a Point grid (call after fluxes and eclipses are final)
         void build(const vector<Point> &pts);
@@ -477,7 +479,8 @@ namespace Lcurve {
                                double &chisq, double &wnok,
                                double &logg1, double &logg2, 
                                double &rv1, double &rv2,
-                               int max_model_points = 500);
+                               int max_model_points = 500,
+                               bool diagnostics = true);
 
     //! Function object to compute chi**2
 
@@ -667,7 +670,8 @@ namespace Lcurve {
                           bool scale, bool rdata, bool info, vector<double> &sfac,
                           vector<double> &calc, double &wdwarf,
                           double &chisq, double &wnok,
-                          double &logg1, double &logg2, double &rv1, double &rv2);
+                          double &logg1, double &logg2, double &rv1, double &rv2,
+                          bool diagnostics = true);
 
     //! Re-scales a fit to minimise chi**2
     double re_scale(const Lcurve::Data &data, vector<double> &fit,

@@ -1,5 +1,7 @@
 #include <cstdlib>
 #include <iostream>
+#include <algorithm>
+#include <vector>
 #include "../new_subs.h"
 #include "constants.h"
 #include "../lroche_base/roche.h"
@@ -48,16 +50,23 @@ double Lcurve::comp_gravity1(const Model& mdl, const vector<Lcurve::Point>& star
 
     }
 
-    double sumfg=0., sumf=0;
-
-    // Star 1.
-    #pragma omp parallel for schedule(static) reduction(+:sumfg,sumf)
-    for(long unsigned int i=0; i<star1.size(); i++){
-        const Point& pt = star1[i];
-        // flux has built-in area factor
-        sumfg += pt.flux*pt.gravity;
-        sumf += pt.flux;
+    // Star 1. Block partial sums merged in fixed order so the result does
+    // not depend on thread count or scheduling.
+    const size_t BLK = 8192, nn = star1.size(), nblk = (nn + BLK - 1)/BLK;
+    std::vector<double> pfg(nblk), pf(nblk);
+    #pragma omp parallel for schedule(static)
+    for(long b=0; b<(long)nblk; b++){
+        double bfg=0., bf=0.;
+        for(size_t i=b*BLK, e=std::min(nn, b*BLK+BLK); i<e; i++){
+            const Point& pt = star1[i];
+            // flux has built-in area factor
+            bfg += pt.flux*pt.gravity;
+            bf  += pt.flux;
+        }
+        pfg[b] = bfg; pf[b] = bf;
     }
+    double sumfg=0., sumf=0;
+    for(size_t b=0; b<nblk; b++){ sumfg += pfg[b]; sumf += pf[b]; }
     if((gref > 0) & (sumfg > 0) & (sumf > 0))
         return log10(gref*sumfg/sumf);
     else
@@ -107,16 +116,22 @@ double Lcurve::comp_gravity2(const Model& mdl,
 
     }
 
-    double sumfg=0., sumf=0;
-
-    // Star 2.
-    #pragma omp parallel for schedule(static) reduction(+:sumfg,sumf)
-    for(long unsigned int i=0; i<star2.size(); i++){
-        const Point& pt = star2[i];
-        // flux has built-in area factor
-        sumfg += pt.flux*pt.gravity;
-        sumf += pt.flux;
+    // Star 2. Deterministic blocked merge (see comp_gravity1).
+    const size_t BLK = 8192, nn = star2.size(), nblk = (nn + BLK - 1)/BLK;
+    std::vector<double> pfg(nblk), pf(nblk);
+    #pragma omp parallel for schedule(static)
+    for(long b=0; b<(long)nblk; b++){
+        double bfg=0., bf=0.;
+        for(size_t i=b*BLK, e=std::min(nn, b*BLK+BLK); i<e; i++){
+            const Point& pt = star2[i];
+            // flux has built-in area factor
+            bfg += pt.flux*pt.gravity;
+            bf  += pt.flux;
+        }
+        pfg[b] = bfg; pf[b] = bf;
     }
+    double sumfg=0., sumf=0;
+    for(size_t b=0; b<nblk; b++){ sumfg += pfg[b]; sumf += pf[b]; }
     if((gref > 0) & (sumfg > 0) & (sumf > 0))
         return log10(gref*sumfg/sumf);
     else

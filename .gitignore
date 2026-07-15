@@ -32,6 +32,7 @@ example/j0658.json
 j0658chain_out.txt
 j0658output.txt
 build-reldbg/
+/build-gpu/
 *.pkl
 config_report.*
 lm_iter_log.txt

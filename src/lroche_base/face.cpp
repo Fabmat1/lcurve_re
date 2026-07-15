@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <vector>
 #include "../new_subs.h"
 #include "roche.h"
 
@@ -61,6 +62,103 @@ struct RayPot {
 };
 
 } // unnamed namespace
+
+/* Batched version of the radius solve inside face(): the reference-radius
+ * check, the halving search and the binary chop are run for all directions
+ * in lockstep, with inactive lanes masked out, so each lane performs the
+ * same arithmetic sequence as the scalar routine while the compiler
+ * vectorises across lanes. */
+void Roche::face_chop_batch(double q, STAR star, double spin,
+                            const double* dx, const double* dy, const double* dz,
+                            int n, double rref, double pref, double acc,
+                            double* rad, unsigned char* fail){
+
+    (void)dz; // unit-vector identity makes the explicit z component redundant
+
+    const double mu = q / (1 + q);
+    const double comp = 1. - mu;
+    const double spin_sq = spin * spin;
+    const double cx = (star == PRIMARY) ? 0. : 1.;
+    const bool primary = (star == PRIMARY);
+
+    // Roche potential along ray i at radius r; same expressions as RayPot
+    auto pot = [&](int i, double r) -> double {
+        double rdx = r * dx[i];
+        double px = cx + rdx;
+        double py = r * dy[i];
+        double x2y2 = px * px + py * py;
+        double rr = r * r;
+        // dir is a unit vector and r is positive: the distance to the star
+        // whose face is being solved is exactly r. Only the distance to the
+        // companion needs a square root. This removes one sqrt from every
+        // binary-chop iteration (the dominant grid-construction cost).
+        double down = r;
+        double dcomp = sqrt(rr + 1. + (primary ? -2. : 2.) * rdx);
+        if (primary)
+            return -comp / down - mu / dcomp
+                   - spin_sq * x2y2 / 2. + mu * px;
+        return -comp / dcomp - mu / down
+               - spin_sq * (0.5 + 0.5 * x2y2 - px) - comp * px;
+    };
+
+    // This function is called once per latitude ring. Reuse its scratch
+    // storage on each outer-grid worker instead of allocating three vectors
+    // for every ring and every solver evaluation.
+    static thread_local std::vector<double> r1, r2, tref;
+    r1.resize(n); r2.resize(n); tref.resize(n);
+
+    // Reference-radius sanity check (scalar face() throws here)
+    #pragma omp simd
+    for (int i = 0; i < n; i++) {
+        fail[i] = pot(i, rref) < pref ? 1 : 0;
+        r1[i]   = rref / 2;
+        r2[i]   = rref;
+        tref[i] = pref + 1.;
+    }
+
+    // Halving search for a radius below the reference potential
+    const int MAXSEARCH = 30;
+    for (int it = 0; it < MAXSEARCH; it++) {
+        int nact = 0;
+        #pragma omp simd reduction(+:nact)
+        for (int i = 0; i < n; i++) {
+            if (!fail[i] && tref[i] > pref) {
+                r1[i] = r2[i] / 2;
+                double t = pot(i, r1[i]);
+                tref[i] = t;
+                if (t > pref) r2[i] = r1[i];
+                nact++;
+            }
+        }
+        if (nact == 0) break;
+    }
+    for (int i = 0; i < n; i++)
+        if (!fail[i] && tref[i] > pref) fail[i] = 2;
+
+    // Binary chop, all lanes in lockstep
+    const int MAXCHOP = 100;
+    int nchop = 0;
+    for (; nchop < MAXCHOP; nchop++) {
+        int nact = 0;
+        #pragma omp simd reduction(+:nact)
+        for (int i = 0; i < n; i++) {
+            if (!fail[i] && r2[i] - r1[i] > acc) {
+                double r = (r1[i] + r2[i]) / 2.;
+                if (pot(i, r) < pref)
+                    r1[i] = r;
+                else
+                    r2[i] = r;
+                nact++;
+            }
+        }
+        if (nact == 0) break;
+    }
+    #pragma omp simd
+    for (int i = 0; i < n; i++) {
+        if (!fail[i] && r2[i] - r1[i] > acc) fail[i] = 3;
+        rad[i] = (r1[i] + r2[i]) / 2.;
+    }
+}
 
 void Roche::face(double q, STAR star, double spin, const Subs::Vec3& dirn, double rref, double pref, double acc,
                  Subs::Vec3& pvec, Subs::Vec3& dvec, double& r, double& g){

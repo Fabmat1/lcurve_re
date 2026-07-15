@@ -67,7 +67,11 @@ GeomKey make_geom_key(const Lcurve::Model &m) {
     k.r1 = m.r1.value; k.r2 = m.r2.value;
     k.cphi3 = m.cphi3.value; k.cphi4 = m.cphi4.value;
     k.spin1 = m.spin1.value; k.spin2 = m.spin2.value;
-    k.velocity_scale = m.velocity_scale.value; k.tperiod = m.tperiod;
+    // velocity_scale/tperiod only shape the grids through the lensing
+    // correction; without lensing the geometry is independent of them,
+    // so key them out to keep cache hits on e.g. velocity_scale steps.
+    k.velocity_scale = m.glens1 ? m.velocity_scale.value : 0.;
+    k.tperiod = m.glens1 ? m.tperiod : 0.;
     k.llo = m.llo; k.lhi = m.lhi; k.lfudge = m.lfudge;
     k.delta_phase = m.delta_phase;
     k.phase1 = m.phase1; k.phase2 = m.phase2;
@@ -118,7 +122,8 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
                               vector<double> &sfac,
                               vector<double> &calc, double &wdwarf,
                               double &chisq, double &wnok,
-                              double &logg1, double &logg2, double &rv1, double &rv2) {
+                              double &logg1, double &logg2, double &rv1, double &rv2,
+                              bool diagnostics) {
     // Get the size right
     calc.resize(static_cast<int>(data.size()));
 
@@ -437,8 +442,13 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
                 double w1 = slfac * wgt * gint.scale1(phi) / norm;
                 double w2 = slfac * wgt * gint.scale2(phi) / norm;
 
-                PhaseBatch &b1 = (gint.type(phi) == 1) ? pb1f : pb1c;
-                PhaseBatch &b2 = (gint.type(phi) == 3) ? pb2f : pb2c;
+                // When coarse and fine grids alias, keep all phases in one
+                // batch. Splitting them would traverse the very same grid
+                // twice and launch a second OpenMP team for no benefit.
+                PhaseBatch &b1 = copy1 ? pb1f
+                                       : ((gint.type(phi) == 1) ? pb1f : pb1c);
+                PhaseBatch &b2 = copy2 ? pb2f
+                                       : ((gint.type(phi) == 3) ? pb2f : pb2c);
                 b1.push(earth.x(), earth.y(), earth.z(), phin, w1, (int)np);
                 b2.push(earth.x(), earth.y(), earth.z(), phin, w2, (int)np);
             }
@@ -488,9 +498,14 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
         for (size_t np = 0; np < data.size(); np++) calc[np] += mdl.third;
     }
 
-    // Compute white dwarf contribution
-    wdwarf = comp_star1_flat(mdl.iangle, ldc1, 0.5, 0., 1, mdl.q, mdl.beam_factor1,
-                        mdl.velocity_scale, gint, fg1f, fg1c);
+    // Solvers only consume the fit and chi-square. Avoid another full face
+    // sweep for the reporting-only white-dwarf contribution in their hot
+    // iteration loops.
+    wdwarf = diagnostics
+        ? comp_star1_flat(mdl.iangle, ldc1, 0.5, 0., 1, mdl.q,
+                          mdl.beam_factor1, mdl.velocity_scale,
+                          gint, fg1f, fg1c)
+        : 0.0;
 
     if (scale) {
         if (mdl.iscale) {
@@ -570,11 +585,15 @@ void Lcurve::light_curve_comp(const Lcurve::Model &mdl,
         }
     }
     
-    // calculate flux-weighted loggs and volume-averaged radii
-    logg1 = comp_gravity1(mdl, star1f);
-    logg2 = comp_gravity2(mdl, star2f);
-    rv1 = comp_radius1(star1f);
-    rv2 = comp_radius2(star2f);
+    // These four reductions are reporting diagnostics, not part of the fit.
+    if (diagnostics) {
+        logg1 = comp_gravity1(mdl, star1f);
+        logg2 = comp_gravity2(mdl, star2f);
+        rv1 = comp_radius1(star1f);
+        rv2 = comp_radius2(star2f);
+    } else {
+        logg1 = logg2 = rv1 = rv2 = 0.0;
+    }
 
     return;
 }

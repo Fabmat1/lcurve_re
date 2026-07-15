@@ -6,6 +6,7 @@
  * grids, SIMD reductions), which perturbs sums at the rounding level.
  */
 #include <cmath>
+#include <atomic>
 #include <vector>
 #ifdef _OPENMP
 #include <omp.h>
@@ -14,12 +15,16 @@
 #include "constants.h"
 #include "../lroche_base/roche.h"
 #include "lcurve.h"
+#ifdef HAVE_CUDA
+#include "comp_light_cuda.h"
+#endif
 
 using std::vector;
 
 /* ---------------- FlatGrid::build ---------------------------- */
 
 void Lcurve::FlatGrid::build(const vector<Point> &pts) {
+    static std::atomic<std::uint64_t> next_generation{1};
     n = pts.size();
     size_t c0 = 0, c1 = 0;
     for (const auto &p : pts) {
@@ -56,6 +61,7 @@ void Lcurve::FlatGrid::build(const vector<Point> &pts) {
             moff.push_back(static_cast<int>(min_.size()));
         }
     }
+    generation = next_generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 /* ---------------- element kernels ----------------------------- */
@@ -83,7 +89,9 @@ inline double imu_bl(double mu, const LdcC &L) {
         double msq = std::sqrt(std::max(m, 0.0));
         im = L.base + msq * (L.c1 + msq * (L.c2 + msq * (L.c3 + msq * L.c4)));
     }
-    return mu > 0.0 ? im : 0.0;
+    // Arithmetic mask keeps phase-wise SIMD loops free of control flow.
+    // im is finite for mu <= 0 because the square-root input is clamped.
+    return static_cast<double>(mu > 0.0) * im;
 }
 
 //! raw-pointer view of a FlatGrid, so the SIMD loops see plain arrays
@@ -115,7 +123,7 @@ inline double s1_elem(const GridPtrs &g, size_t i,
         double mud = mu - mu * vr - vn;
         val = mu * g.flux[i] * (1.0 - beam * vr) * imu_bl<LTYPE>(mud, L);
     }
-    return mu > L.mucrit ? val : 0.0;
+    return static_cast<double>(mu > L.mucrit) * val;
 }
 
 //! star-2 element flux
@@ -151,7 +159,12 @@ inline double s2_elem(const GridPtrs &g, size_t i,
         double mud = mu - mu * vr - vn;
         val = mu * magn * g.flux[i] * (1.0 - beam * vr) * imu_bl<LTYPE>(mud, L);
     }
-    return mu > L.mucrit ? val : 0.0;
+    // Preserve the old conditional's hide-zero semantics for the lensing
+    // division edge cases. The common no-lensing path remains branchless so
+    // GCC can vectorise phases.
+    if constexpr (GLENS)
+        return mu > L.mucrit ? val : 0.0;
+    return static_cast<double>(mu > L.mucrit) * val;
 }
 
 //! same eclipse test as Point::visible for one range
@@ -235,52 +248,62 @@ void sum_star1_multi_t(const FlatGrid &fg, const Lcurve::PhaseBatch &pb,
     const long nblk = static_cast<long>((n + FACE_BLOCK - 1) / FACE_BLOCK);
     std::fill(out, out + nent, 0.0);
 
-    #pragma omp parallel if(!omp_in_parallel())
-    {
-        std::vector<double> acc(nent, 0.0);
-        #pragma omp for schedule(dynamic) nowait
-        for (long b = 0; b < nblk; b++) {
-            const size_t lo = b * FACE_BLOCK;
-            const size_t hi = std::min(n, lo + FACE_BLOCK);
-            const size_t a1 = std::min(hi, n0);            // plain segment
-            const size_t b0 = std::max(lo, n0);            // 1-range segment
-            const size_t b1 = std::min(hi, n1);
-            const size_t c0 = std::max(lo, n1);            // ragged segment
+    // Per-block partial sums merged in fixed block order: each block's row
+    // is the same arithmetic no matter which thread runs it, so the result
+    // is independent of scheduling and thread count (bitwise reproducible).
+    std::vector<double> blk(static_cast<size_t>(nblk) * nent);
+    #pragma omp parallel for schedule(dynamic) if(!omp_in_parallel())
+    for (long b = 0; b < nblk; b++) {
+        double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        const size_t lo = b * FACE_BLOCK;
+        const size_t hi = std::min(n, lo + FACE_BLOCK);
+        const size_t a1 = std::min(hi, n0);            // plain segment
+        const size_t b0 = std::max(lo, n0);            // 1-range segment
+        const size_t b1 = std::min(hi, n1);
+        const size_t c0 = std::max(lo, n1);            // ragged segment
 
+        std::fill(brow, brow + nent, 0.0);
+
+        // Phases are the SIMD dimension. Each lane owns one output and faces
+        // are still accumulated in ascending order, avoiding a floating-
+        // point reduction while loading each face's data only once.
+        for (size_t i = lo; i < a1; i++) {
+            #pragma omp simd
+            for (int k = 0; k < nent; k++)
+                brow[k] += s1_elem<LTYPE, BEAM>(
+                    g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                    beam, spin, VFAC, XCOFM);
+        }
+
+        for (size_t i = b0; i < b1; i++) {
+            const double ein = g.in1[i - n0], eout = g.out1[i - n0];
+            #pragma omp simd
             for (int k = 0; k < nent; k++) {
-                const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
-                const double phin = pb.phin[k];
-                double s = 0.0;
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = lo; i < a1; i++)
-                    s += s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L, beam,
-                                              spin, VFAC, XCOFM);
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = b0; i < b1; i++) {
-                    double v = s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L,
-                                                    beam, spin, VFAC, XCOFM);
-                    s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
-                             ? 0.0 : v;
-                }
-
-                for (size_t i = c0; i < hi; i++) {
-                    bool ecl = false;
-                    for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
-                        if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
-                            ecl = true;
-                            break;
-                        }
-                    if (!ecl)
-                        s += s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L, beam,
-                                                  spin, VFAC, XCOFM);
-                }
-                acc[k] += s;
+                double v = s1_elem<LTYPE, BEAM>(
+                    g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                    beam, spin, VFAC, XCOFM);
+                brow[k] += ecl_range(pb.phin[k], ein, eout) ? 0.0 : v;
             }
         }
-        #pragma omp critical
-        for (int k = 0; k < nent; k++) out[k] += acc[k];
+
+        for (size_t i = c0; i < hi; i++) {
+            for (int k = 0; k < nent; k++) {
+                bool ecl = false;
+                for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
+                    if (ecl_range(pb.phin[k], fg.min_[j], fg.mout_[j])) {
+                        ecl = true;
+                        break;
+                    }
+                if (!ecl)
+                    brow[k] += s1_elem<LTYPE, BEAM>(
+                        g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                        beam, spin, VFAC, XCOFM);
+            }
+        }
+    }
+    for (long b = 0; b < nblk; b++) {
+        const double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        for (int k = 0; k < nent; k++) out[k] += brow[k];
     }
 }
 
@@ -294,56 +317,57 @@ void sum_star2_multi_t(const FlatGrid &fg, const Lcurve::PhaseBatch &pb,
     const long nblk = static_cast<long>((n + FACE_BLOCK - 1) / FACE_BLOCK);
     std::fill(out, out + nent, 0.0);
 
-    #pragma omp parallel if(!omp_in_parallel())
-    {
-        std::vector<double> acc(nent, 0.0);
-        #pragma omp for schedule(dynamic) nowait
-        for (long b = 0; b < nblk; b++) {
-            const size_t lo = b * FACE_BLOCK;
-            const size_t hi = std::min(n, lo + FACE_BLOCK);
-            const size_t a1 = std::min(hi, n0);
-            const size_t b0 = std::max(lo, n0);
-            const size_t b1 = std::min(hi, n1);
-            const size_t c0 = std::max(lo, n1);
+    // Deterministic merge: see sum_star1_multi_t.
+    std::vector<double> blk(static_cast<size_t>(nblk) * nent);
+    #pragma omp parallel for schedule(dynamic) if(!omp_in_parallel())
+    for (long b = 0; b < nblk; b++) {
+        double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        const size_t lo = b * FACE_BLOCK;
+        const size_t hi = std::min(n, lo + FACE_BLOCK);
+        const size_t a1 = std::min(hi, n0);
+        const size_t b0 = std::max(lo, n0);
+        const size_t b1 = std::min(hi, n1);
+        const size_t c0 = std::max(lo, n1);
 
+        std::fill(brow, brow + nent, 0.0);
+
+        for (size_t i = lo; i < a1; i++) {
+            #pragma omp simd
+            for (int k = 0; k < nent; k++)
+                brow[k] += s2_elem<LTYPE, BEAM, GLENS>(
+                    g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                    beam, spin, VFAC, XCOFM, rlens1);
+        }
+
+        for (size_t i = b0; i < b1; i++) {
+            const double ein = g.in1[i - n0], eout = g.out1[i - n0];
+            #pragma omp simd
             for (int k = 0; k < nent; k++) {
-                const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
-                const double phin = pb.phin[k];
-                double s = 0.0;
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = lo; i < a1; i++)
-                    s += s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez, L,
-                                                     beam, spin, VFAC,
-                                                     XCOFM, rlens1);
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = b0; i < b1; i++) {
-                    double v = s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez,
-                                                           L, beam, spin,
-                                                           VFAC, XCOFM,
-                                                           rlens1);
-                    s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
-                             ? 0.0 : v;
-                }
-
-                for (size_t i = c0; i < hi; i++) {
-                    bool ecl = false;
-                    for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
-                        if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
-                            ecl = true;
-                            break;
-                        }
-                    if (!ecl)
-                        s += s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez, L,
-                                                         beam, spin, VFAC,
-                                                         XCOFM, rlens1);
-                }
-                acc[k] += s;
+                double v = s2_elem<LTYPE, BEAM, GLENS>(
+                    g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                    beam, spin, VFAC, XCOFM, rlens1);
+                brow[k] += ecl_range(pb.phin[k], ein, eout) ? 0.0 : v;
             }
         }
-        #pragma omp critical
-        for (int k = 0; k < nent; k++) out[k] += acc[k];
+
+        for (size_t i = c0; i < hi; i++) {
+            for (int k = 0; k < nent; k++) {
+                bool ecl = false;
+                for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
+                    if (ecl_range(pb.phin[k], fg.min_[j], fg.mout_[j])) {
+                        ecl = true;
+                        break;
+                    }
+                if (!ecl)
+                    brow[k] += s2_elem<LTYPE, BEAM, GLENS>(
+                        g, i, pb.ex[k], pb.ey[k], pb.ez[k], L,
+                        beam, spin, VFAC, XCOFM, rlens1);
+            }
+        }
+    }
+    for (long b = 0; b < nblk; b++) {
+        const double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        for (int k = 0; k < nent; k++) out[k] += brow[k];
     }
 }
 
@@ -389,6 +413,10 @@ double flat_sum_star2(const FlatGrid &g, double ex, double ey, double ez,
 void Lcurve::flat_sum_star1_multi(const FlatGrid &g, const PhaseBatch &pb,
                                   const LDC &ldc, double beam, double spin,
                                   double VFAC, double XCOFM, double *out) {
+#ifdef HAVE_CUDA
+    if (cuda_sum_star1_multi(g, pb, ldc, beam, spin, VFAC, XCOFM, out))
+        return;
+#endif
     LdcC L{ldc.c1(), ldc.c2(), ldc.c3(), ldc.c4(),
            1.0 - (ldc.c1() + ldc.c2() + ldc.c3() + ldc.c4()),
            ldc.mucrit_val()};
@@ -407,6 +435,11 @@ void Lcurve::flat_sum_star2_multi(const FlatGrid &g, const PhaseBatch &pb,
                                   const LDC &ldc, double beam, double spin,
                                   double VFAC, double XCOFM,
                                   bool glens1, double rlens1, double *out) {
+#ifdef HAVE_CUDA
+    if (cuda_sum_star2_multi(g, pb, ldc, beam, spin, VFAC, XCOFM,
+                            glens1, rlens1, out))
+        return;
+#endif
     LdcC L{ldc.c1(), ldc.c2(), ldc.c3(), ldc.c4(),
            1.0 - (ldc.c1() + ldc.c2() + ldc.c3() + ldc.c4()),
            ldc.mucrit_val()};

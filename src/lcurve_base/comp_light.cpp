@@ -156,11 +156,12 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
     const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    double sum = 0.0;
+    // Per-sub-exposure partials summed in index order: deterministic
+    // regardless of thread count or scheduling.
+    std::vector<double> part(ndiv, 0.0);
 
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+:sum) schedule(static) \
-                     if(!omp_in_parallel())
+#pragma omp parallel for schedule(static) if(!omp_in_parallel())
 #endif
     for (int nd = 0; nd < ndiv; ++nd) {
 
@@ -202,10 +203,12 @@ double Lcurve::comp_light(double iangle, const LDC& ldc1, const LDC& ldc2,
         for (const auto& pt : spot)
             ss += spot_elem(pt, earth, phi);
 
-        sum += wgt * ( gint.scale1(phi)*s1 +
-                       gint.scale2(phi)*s2 + sd + se + ss );
+        part[nd] = wgt * ( gint.scale1(phi)*s1 +
+                           gint.scale2(phi)*s2 + sd + se + ss );
     }
 
+    double sum = 0.0;
+    for (int nd = 0; nd < ndiv; ++nd) sum += part[nd];
     return sum / std::max(1, ndiv-1);
 }
 
@@ -225,11 +228,11 @@ double Lcurve::comp_star1(double iangle, const LDC& ldc1,
     const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    double sum = 0.0;
+    // Deterministic per-sub-exposure merge (see comp_light).
+    std::vector<double> part(ndiv, 0.0);
 
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+:sum) schedule(static) \
-                     if(!omp_in_parallel())
+#pragma omp parallel for schedule(static) if(!omp_in_parallel())
 #endif
     for (int nd = 0; nd < ndiv; ++nd) {
 
@@ -251,9 +254,11 @@ double Lcurve::comp_star1(double iangle, const LDC& ldc1,
             s1 += star1_elem(pt, earth, phi, ldc1,
                              beam1, 1.0, VFAC, XCOFM);
 
-        sum += wgt * gint.scale1(phi) * s1;
+        part[nd] = wgt * gint.scale1(phi) * s1;
     }
 
+    double sum = 0.0;
+    for (int nd = 0; nd < ndiv; ++nd) sum += part[nd];
     return sum / std::max(1, ndiv-1);
 }
 
@@ -274,11 +279,11 @@ double Lcurve::comp_star2(double iangle, const LDC& ldc2,
     const double XCOFM = q/(1.0+q);
     const double VFAC  = vscale/(Constants::C/1.e3);
 
-    double sum = 0.0;
+    // Deterministic per-sub-exposure merge (see comp_light).
+    std::vector<double> part(ndiv, 0.0);
 
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+:sum) schedule(static) \
-                     if(!omp_in_parallel())
+#pragma omp parallel for schedule(static) if(!omp_in_parallel())
 #endif
     for (int nd = 0; nd < ndiv; ++nd) {
 
@@ -301,9 +306,11 @@ double Lcurve::comp_star2(double iangle, const LDC& ldc2,
                              beam2, 1.0, VFAC, XCOFM,
                              glens1, rlens1);
 
-        sum += wgt * gint.scale2(phi) * s2;
+        part[nd] = wgt * gint.scale2(phi) * s2;
     }
 
+    double sum = 0.0;
+    for (int nd = 0; nd < ndiv; ++nd) sum += part[nd];
     return sum / std::max(1, ndiv-1);
 }
 
@@ -318,11 +325,11 @@ static double disc_like(double iangle,
                         double phase, double expose, int ndiv,
                         const vector<Lcurve::Point>& surf)
 {
-    double sum = 0.0;
+    // Deterministic per-sub-exposure merge (see comp_light).
+    std::vector<double> part(ndiv, 0.0);
 
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+:sum) schedule(static) \
-                     if(!omp_in_parallel())
+#pragma omp parallel for schedule(static) if(!omp_in_parallel())
 #endif
     for (int nd = 0; nd < ndiv; ++nd) {
 
@@ -341,9 +348,11 @@ static double disc_like(double iangle,
         for (const auto& pt : surf)
             s += disc_elem(pt, earth, phi, lin_ld, quad_ld);
 
-        sum += wgt * s;
+        part[nd] = wgt * s;
     }
 
+    double sum = 0.0;
+    for (int nd = 0; nd < ndiv; ++nd) sum += part[nd];
     return sum / std::max(1, ndiv-1);
 }
 
@@ -367,11 +376,11 @@ double Lcurve::comp_spot(double iangle,
                          double phase,double expose,int ndiv,double /*q*/,
                          const vector<Point>& spot)
 {
-    double sum = 0.0;
+    // Deterministic per-sub-exposure merge (see comp_light).
+    std::vector<double> part(ndiv, 0.0);
 
 #ifdef _OPENMP
-#pragma omp parallel for reduction(+:sum) schedule(static) \
-                     if(!omp_in_parallel())
+#pragma omp parallel for schedule(static) if(!omp_in_parallel())
 #endif
     for (int nd=0; nd<ndiv; ++nd) {
 
@@ -390,8 +399,10 @@ double Lcurve::comp_spot(double iangle,
         for (const auto& pt : spot)
             s += spot_elem(pt, earth, phi);
 
-        sum += wgt*s;
+        part[nd] = wgt*s;
     }
 
+    double sum = 0.0;
+    for (int nd = 0; nd < ndiv; ++nd) sum += part[nd];
     return sum / std::max(1, ndiv-1);
 }

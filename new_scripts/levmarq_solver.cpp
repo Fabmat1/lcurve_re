@@ -45,6 +45,10 @@
 #include "../src/physical_prior.h"
 #include "../src/chain_stats.h"
 #include "../src/report_writer.h"
+#ifdef HAVE_CUDA
+#include "../src/lcurve_base/comp_light_cuda.h"
+#include "../src/lcurve_base/set_star_grid_cuda.h"
+#endif
 
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -662,7 +666,7 @@ int main(int argc, char* argv[])
             try {
                 light_curve_comp_fast(model, data, scale, !no_file, false, sfac,
                                     fitv, wd, ch, wn, lg1, lg2, rv1, rv2,
-                                    max_model_points);
+                                    max_model_points, false);
             } catch (const std::exception& e) {
                 if (verbose) {
                     std::cerr << DIM << "  [eval failed: " << e.what() << "]"
@@ -937,12 +941,6 @@ int main(int argc, char* argv[])
 
         auto t_start = Clock::now();
 
-        // ── Track best solution across all stages ────────────────────────
-        Subs::Array1D<double> best_pars = current_pars;
-        double best_sum_sq  = 1e30;
-        double best_chisq   = 1e30;
-        vector<double> best_fit = current_fit;
-
         struct IterLog {
             int    iter;
             double sum_sq;
@@ -953,13 +951,68 @@ int main(int argc, char* argv[])
             int    fev;
             double prior_scale;
             string status;
+            int    run;
         };
         vector<IterLog> iter_log;
 
-        int  total_iter = 0;
+        int  total_iter  = 0;
+        int  current_run = 0;   // multi-start run tag for the iteration log
+
+        // Globals adopted from the winning run after the multi-start driver
+        Subs::Array1D<double> best_pars = current_pars;
+        double best_sum_sq  = 1e30;
+        double best_chisq   = 1e30;
+        vector<double> best_fit = current_fit;
         bool converged  = false;
         string stop_reason = "max_iter";
-        double lambda = -1.0;  // will be initialised per stage
+        double lambda = -1.0;   // final damping of the adopted run
+
+        // ═════════════════════════════════════════════════════════════════
+        //  ONE FULL LM SOLVE (continuation schedule included), restartable
+        //  from an arbitrary starting point.  All optimizer state is local
+        //  so repeated calls are independent and deterministic.
+        // ═════════════════════════════════════════════════════════════════
+        struct LMRun {
+            Subs::Array1D<double> pars;
+            double sum_sq   = 1e30;
+            double chisq_lc = 1e30;
+            vector<double> fit;
+            bool   converged = false;
+            string stop_reason = "failed";
+            int    iters = 0;
+            double final_lambda = -1.0;
+            double balance = 1.0;   // final prior balance factor
+            bool   ok = false;
+        };
+
+        auto run_lm = [&](const Subs::Array1D<double>& start_pars,
+                          bool chatty) -> LMRun
+        {
+            LMRun result;
+            const bool vrb = verbose && chatty;
+            const int fev_start = fev_count;
+
+            Subs::Array1D<double> current_pars = start_pars;
+            vector<double> current_fit;
+            {   // reject unusable starting points immediately
+                vector<double> r0; double ch0;
+                double saved_ps = active_prior_scale;
+                active_prior_scale = 0.0;
+                bool ok0 = compute_residuals(current_pars, r0, ch0, current_fit);
+                active_prior_scale = saved_ps;
+                if (!ok0) return result;
+            }
+
+            D.assign(npar, 1.0);
+            D_initialised = false;
+
+            Subs::Array1D<double> best_pars = current_pars;
+            double best_sum_sq  = 1e30;
+            double best_chisq   = 1e30;
+            vector<double> best_fit = current_fit;
+            bool converged  = false;
+            string stop_reason = "max_iter";
+            double lambda = -1.0;  // will be initialised per stage
 
         // ═════════════════════════════════════════════════════════════════
         //  CONTINUATION OUTER LOOP
@@ -1005,7 +1058,7 @@ int main(int argc, char* argv[])
                     prior_balance_factor = 1.0;
                 }
 
-                if (verbose) {
+                if (vrb) {
                     cout << "  Prior balance: χ²(LC) = " << fixed
                         << setprecision(4) << chisq_lc_only
                         << "  raw_prior_per_1σ = " << setprecision(2)
@@ -1039,7 +1092,7 @@ int main(int argc, char* argv[])
             double stage_ftol = is_final_stage ? ftol : std::max(ftol, 1e-4);
             double stage_xtol = is_final_stage ? xtol : std::max(xtol, 1e-4);
 
-            if (continuation_schedule.size() > 1) {
+            if (chatty && continuation_schedule.size() > 1) {
                 cout << "\n" << BRIGHT_CYAN
                     << "─── Continuation stage " << stage + 1 << "/"
                     << continuation_schedule.size()
@@ -1063,7 +1116,7 @@ int main(int argc, char* argv[])
             double sum_sq = 0.0;
             for (double r : resid) sum_sq += r * r;
 
-            if (verbose) {
+            if (vrb) {
                 cout << "  Start:  χ²(LC) = " << fixed << setprecision(4)
                     << chisq_lc << "   ‖r‖² = " << sum_sq;
                 if (active_prior_scale > 0) {
@@ -1096,7 +1149,7 @@ int main(int argc, char* argv[])
             }
             double nu = 2.0;
 
-            if (verbose) {
+            if (vrb) {
                 cout << "  " << setw(5) << left << "Iter"
                     << setw(14) << right << "‖r‖²"
                     << setw(14) << "χ²(LC)"
@@ -1142,7 +1195,7 @@ int main(int argc, char* argv[])
                     lambda *= nu;
                     nu *= 2.0;
                     consecutive_fails++;
-                    if (verbose)
+                    if (vrb)
                         cout << "  " << setw(5) << left << stage_iter
                             << "  Cholesky failed, λ → "
                             << scientific << lambda << endl;
@@ -1193,7 +1246,7 @@ int main(int argc, char* argv[])
                     consecutive_fails++;
                     iter_log.push_back({total_iter, sum_sq, chisq_lc, lambda,
                         step_norm, -1.0, fev_count, active_prior_scale,
-                        "eval_fail"});
+                        "eval_fail", current_run});
                     if (consecutive_fails > 50) {
                         stop_reason = "max consecutive failures";
                         break;
@@ -1269,9 +1322,10 @@ int main(int argc, char* argv[])
                 lambda = std::clamp(lambda, 1e-20, 1e20);
 
                 iter_log.push_back({total_iter, sum_sq, chisq_lc, lambda,
-                    step_norm, rho, fev_count, active_prior_scale, status});
+                    step_norm, rho, fev_count, active_prior_scale, status,
+                    current_run});
 
-                if (verbose && (stage_iter % progress_interval == 0
+                if (vrb && (stage_iter % progress_interval == 0
                                 || stage_converged))
                 {
                     string col;
@@ -1291,12 +1345,13 @@ int main(int argc, char* argv[])
                         << "  " << col << status << RESET << endl;
                 }
 
-                if (plotting && stage_iter % max(1, progress_interval) == 0)
+                if (plotting && chatty
+                    && stage_iter % max(1, progress_interval) == 0)
                     Helpers::plot_model_live(data, current_fit, no_file,
                                             copy, *gp_ptr);
 
                 if (stage_converged) break;
-                if (fev_count >= max_fev) {
+                if (fev_count - fev_start >= max_fev) {
                     stop_reason = "max function evaluations";
                     goto lm_done;  // break out of both loops
                 }
@@ -1326,13 +1381,310 @@ int main(int argc, char* argv[])
             double ch_tmp;
             vector<double> f_tmp;
             active_prior_scale = 1.0;
-            compute_residuals(current_pars, r_tmp, ch_tmp, f_tmp);
+            if (!compute_residuals(current_pars, r_tmp, ch_tmp, f_tmp))
+                return result;
             for (double rr : r_tmp) ss += rr * rr;
             best_sum_sq = ss;
             best_chisq  = ch_tmp;
             best_pars   = current_pars;
             best_fit    = f_tmp;
         }
+
+            result.pars         = best_pars;
+            result.sum_sq       = best_sum_sq;
+            result.chisq_lc     = best_chisq;
+            result.fit          = best_fit;
+            result.converged    = converged;
+            result.stop_reason  = stop_reason;
+            result.iters        = total_iter;
+            result.final_lambda = lambda;
+            result.balance      = prior_balance_factor;
+            result.ok           = true;
+            return result;
+        };
+
+        // ═════════════════════════════════════════════════════════════════
+        //  MULTI-START DRIVER
+        //
+        //  The χ² landscape of non-eclipsing binaries is often multimodal
+        //  along the iangle–q–velocity_scale degeneracy ridge.  A single LM
+        //  descent picks whichever basin the starting point drains into, so
+        //  additional deterministic starts sweep the parameter space:
+        //  iangle is stratified across its full allowed range (with q, vs,
+        //  r1 pulled onto the prior-consistent manifold for that
+        //  inclination when K1/M1/R1 priors exist), every other free
+        //  parameter is drawn uniformly within ± span × its config range.
+        //  Converged optima are clustered into distinct modes and each mode
+        //  gets a Laplace-approximated posterior mass.
+        // ═════════════════════════════════════════════════════════════════
+        const int    n_multistart = config.value("lm_multistart", 8);
+        const double ms_span      = config.value("lm_multistart_span", 1.0);
+        Subs::Array1D<double> ranges = model.get_range();
+
+        vector<Subs::Array1D<double>> starts;
+        starts.push_back(current_pars);
+        {
+            mt19937 ms_rng(config.value("seed", 42) + 2);
+            uniform_real_distribution<> u01(0.0, 1.0);
+            const bool consistent_ok = use_priors && obs.has_K
+                                       && obs.has_M1 && obs.has_R1;
+            for (int s = 0; s < n_multistart; ++s) {
+                Subs::Array1D<double> st = current_pars;
+                for (int j = 0; j < npar; ++j) {
+                    if (j == iangle_idx) continue;   // handled below
+                    double rj = ms_span * ranges[j];
+                    if (!(rj > 0.0)) continue;
+                    double lo = std::max(limits[j].first,  current_pars[j] - rj);
+                    double hi = std::min(limits[j].second, current_pars[j] + rj);
+                    if (hi > lo) st[j] = lo + (hi - lo) * u01(ms_rng);
+                }
+                if (iangle_idx >= 0) {
+                    // Stratified over the full geometric range so both low-
+                    // and high-inclination basins are visited.
+                    double ilo = std::max(limits[iangle_idx].first,  5.0);
+                    double ihi = std::min(limits[iangle_idx].second, 90.0);
+                    double frac = (s + 0.2 + 0.6 * u01(ms_rng)) / n_multistart;
+                    double i_s  = ilo + frac * (ihi - ilo);
+                    st[iangle_idx] = i_s;
+                    if (consistent_ok) {
+                        double q_new, vs_new, r1_new;
+                        if (PhysicalPrior::solve_consistent_params(
+                                i_s, obs.K_obs, obs.M1_obs, obs.R1_obs,
+                                obs.P_days, q_new, vs_new, r1_new)) {
+                            if (q_idx >= 0)
+                                st[q_idx] = std::clamp(q_new,
+                                    limits[q_idx].first, limits[q_idx].second);
+                            if (vs_idx >= 0)
+                                st[vs_idx] = std::clamp(vs_new,
+                                    limits[vs_idx].first, limits[vs_idx].second);
+                            if (r1_idx >= 0)
+                                st[r1_idx] = std::clamp(r1_new,
+                                    limits[r1_idx].first, limits[r1_idx].second);
+                        }
+                    }
+                }
+                starts.push_back(st);
+            }
+        }
+
+        vector<LMRun> runs;
+        for (size_t s = 0; s < starts.size(); ++s) {
+            current_run = static_cast<int>(s);
+            const bool chatty = (s == 0);
+            if (!chatty) {
+                cout << BRIGHT_CYAN << "─── Multi-start run " << s << "/"
+                     << starts.size() - 1 << RESET << "  start:";
+                for (int j = 0; j < npar; ++j)
+                    cout << " " << names[j] << "="
+                         << fixed << setprecision(4) << starts[s][j];
+                cout << endl;
+            }
+            LMRun run = run_lm(starts[s], chatty);
+            if (!chatty) {
+                if (run.ok) {
+                    cout << "    → χ²(LC) = " << fixed << setprecision(4)
+                         << run.chisq_lc << "  ‖r‖² = " << run.sum_sq << " ";
+                    for (int j = 0; j < npar; ++j)
+                        cout << " " << names[j] << "="
+                             << setprecision(4) << run.pars[j];
+                    cout << "  [" << run.stop_reason << "]" << endl;
+                } else {
+                    cout << "    → " << BRIGHT_YELLOW
+                         << "run failed (unusable start or no valid step)"
+                         << RESET << endl;
+                }
+            }
+            runs.push_back(std::move(run));
+        }
+
+        // ── Cluster the converged optima into distinct modes ─────────────
+        vector<int> order;
+        for (size_t s = 0; s < runs.size(); ++s)
+            if (runs[s].ok) order.push_back(static_cast<int>(s));
+        if (order.empty()) {
+            cerr << BRIGHT_RED << "All LM starts failed." << RESET << endl;
+            return 1;
+        }
+        sort(order.begin(), order.end(),
+             [&](int a, int b) { return runs[a].sum_sq < runs[b].sum_sq; });
+
+        const double tol_dsteps = config.value("lm_mode_tol_dsteps", 5.0);
+        const double tol_frac   = config.value("lm_mode_tol_frac", 0.02);
+        auto same_mode = [&](const LMRun& a, const LMRun& b) {
+            for (int j = 0; j < npar; ++j) {
+                double thr = std::max(tol_dsteps * std::abs(dsteps[j]),
+                                      tol_frac * 0.5
+                                          * (std::abs(a.pars[j])
+                                             + std::abs(b.pars[j])));
+                if (std::abs(a.pars[j] - b.pars[j]) > std::max(thr, 1e-12))
+                    return false;
+            }
+            return true;
+        };
+
+        struct ModeInfo {
+            int    run_idx;
+            double weight  = 0.0;   // normalized posterior mass (Laplace)
+            double lpost   = 0.0;   // log posterior height / s²
+            double logdet  = 0.0;   // log det Σ (parameter covariance)
+            bool   has_cov = false;
+            vector<vector<double>> cov;
+            int    n_samples = 0;   // error-MCMC samples drawn in this mode
+            int    n_runs    = 1;   // LM starts that drained into this mode
+        };
+        vector<ModeInfo> modes;
+        for (int idx : order) {
+            bool found = false;
+            for (auto& m : modes)
+                if (same_mode(runs[idx], runs[m.run_idx])) {
+                    ++m.n_runs;
+                    found = true;
+                    break;
+                }
+            if (!found) {
+                ModeInfo mi;
+                mi.run_idx = idx;
+                modes.push_back(mi);
+            }
+        }
+
+        // ── Posterior mass per mode (Laplace approximation) ──────────────
+        //
+        //  w ∝ exp(log posterior height) × √det Σ, evaluated with the same
+        //  tempered posterior the error MCMC samples:
+        //  (−0.5 χ²_LC + log-prior) / s², s² = χ²_red of the global best.
+        //
+        const double s2_w = std::max(
+            runs[order[0]].chisq_lc / std::max(1, ndata - npar), 1e-30);
+
+        active_prior_scale   = 1.0;
+        prior_balance_factor = runs[order[0]].balance;
+
+        ObservedConstraints obs_err = obs;
+        obs_err.prior_weight = config.value(
+            "lm_error_mcmc_prior_weight",
+            active_prior_scale * prior_balance_factor * obs.prior_weight);
+
+        auto log_prior_at = [&](const Subs::Array1D<double>& p) {
+            if (!use_priors) return 0.0;
+            return PhysicalPrior::compute(
+                get_par(iangle_idx, model.iangle.value, p),
+                get_par(q_idx,      model.q.value,      p),
+                get_par(vs_idx,     model.velocity_scale.value, p),
+                get_par(r1_idx,     model.r1.value,     p),
+                get_par(r2_idx,     model.r2.value,     p),
+                get_par(t1_idx,     model.t1.value,     p),
+                get_par(t2_idx,     model.t2.value,     p),
+                obs_err);
+        };
+
+        auto mode_covariance = [&](const Subs::Array1D<double>& pars,
+                                   vector<vector<double>>& cov,
+                                   double& logdet_cov) -> bool
+        {
+            vector<double> r0; double ch0; vector<double> f0;
+            if (!compute_residuals(pars, r0, ch0, f0)) return false;
+            vector<vector<double>> Jm;
+            compute_jacobian(pars, r0, Jm, /*central=*/true);
+            const double dsc = 1.0 / std::sqrt(s2_w);
+            for (int i = 0; i < ndata; ++i)
+                for (int j = 0; j < npar; ++j) Jm[i][j] *= dsc;
+            vector<vector<double>> JtJ_m;
+            vector<double> Jtr_m;
+            compute_JtJ_Jtr(Jm, r0, JtJ_m, Jtr_m);
+            // log det(JᵀJ) via Cholesky; Σ = (JᵀJ)⁻¹ ⇒ logdetΣ = −logdet(JᵀJ)
+            vector<vector<double>> L(npar, vector<double>(npar, 0.0));
+            double ld = 0.0;
+            for (int i = 0; i < npar; ++i)
+                for (int j = 0; j <= i; ++j) {
+                    double sacc = JtJ_m[i][j];
+                    for (int k = 0; k < j; ++k) sacc -= L[i][k] * L[j][k];
+                    if (i == j) {
+                        if (sacc <= 1e-30) return false;
+                        L[i][j] = std::sqrt(sacc);
+                        ld += std::log(L[i][j]);
+                    } else {
+                        L[i][j] = sacc / L[j][j];
+                    }
+                }
+            if (!invert_spd(JtJ_m, cov)) return false;
+            logdet_cov = -2.0 * ld;
+            return true;
+        };
+
+        for (auto& m : modes) {
+            const LMRun& r = runs[m.run_idx];
+            vector<double> r_tmp, f_tmp;
+            double chi_m;
+            if (compute_residuals(r.pars, r_tmp, chi_m, f_tmp))
+                m.lpost = (-0.5 * chi_m + log_prior_at(r.pars)) / s2_w;
+            else
+                m.lpost = -1e300;
+            m.has_cov = mode_covariance(r.pars, m.cov, m.logdet);
+        }
+        // Volume term only when every mode has one (comparability)
+        bool all_cov = true;
+        for (auto& m : modes) all_cov = all_cov && m.has_cov;
+        double best_score = -1e300;
+        for (auto& m : modes)
+            best_score = std::max(best_score,
+                m.lpost + (all_cov ? 0.5 * m.logdet : 0.0));
+        double wsum = 0.0;
+        for (auto& m : modes) {
+            double score = m.lpost + (all_cov ? 0.5 * m.logdet : 0.0);
+            m.weight = std::exp(std::max(score - best_score, -700.0));
+            wsum += m.weight;
+        }
+        for (auto& m : modes) m.weight /= std::max(wsum, 1e-300);
+        sort(modes.begin(), modes.end(),
+             [](const ModeInfo& a, const ModeInfo& b)
+             { return a.weight > b.weight; });
+
+        // ── Adopt the highest-mass mode ──────────────────────────────────
+        {
+            const LMRun& adopted = runs[modes[0].run_idx];
+            best_pars   = adopted.pars;
+            best_sum_sq = adopted.sum_sq;
+            best_chisq  = adopted.chisq_lc;
+            best_fit    = adopted.fit;
+            converged   = adopted.converged;
+            stop_reason = adopted.stop_reason;
+            lambda      = adopted.final_lambda;
+            prior_balance_factor = adopted.balance;
+        }
+
+        // Quiet multi-start runs do not redraw the live plot. The adopted
+        // optimum can therefore differ from the curve still on screen.
+        // Refresh the existing window before covariance/error sampling so
+        // its t0 always represents the solution reported below.
+        if (plotting)
+            Helpers::plot_model_live(data, best_fit, no_file, copy, *gp_ptr);
+
+        cout << "\n" << BRIGHT_CYAN
+             << "─── Multi-start summary: " << order.size() << "/"
+             << starts.size() << " runs converged, "
+             << modes.size() << " distinct mode"
+             << (modes.size() == 1 ? "" : "s") << " ───" << RESET << endl;
+        for (size_t m = 0; m < modes.size(); ++m) {
+            const LMRun& r = runs[modes[m].run_idx];
+            cout << "  mode " << m + 1
+                 << (m == 0 ? " (adopted)" : "          ")
+                 << "  mass = " << fixed << setprecision(3) << modes[m].weight
+                 << "  χ²(LC) = " << setprecision(4) << r.chisq_lc
+                 << "  runs = " << modes[m].n_runs << " ";
+            for (int j = 0; j < npar; ++j)
+                cout << " " << names[j] << "="
+                     << setprecision(4) << r.pars[j];
+            cout << endl;
+        }
+        const bool multimodal = modes.size() > 1 && modes[1].weight > 0.05;
+        if (multimodal)
+            cout << BRIGHT_YELLOW
+                 << "  ⚠ The posterior is MULTIMODAL: a secondary mode holds "
+                 << fixed << setprecision(1) << 100.0 * modes[1].weight
+                 << "% of the posterior mass.  The quoted uncertainties "
+                    "below sample all modes in proportion to their mass."
+                 << RESET << endl;
 
         // ─────────────────────────────────────────────────────────────────
         //  Timing
@@ -1547,47 +1899,53 @@ int main(int argc, char* argv[])
         //  Here a short adaptive random-walk Metropolis chain samples the
         //  actual posterior around the *unchanged* LM optimum:
         //
-        //    log p = −0.5 · χ²_LC / s²  +  log-prior(weight 1)
+        //    log p = ( −0.5 · χ²_LC  +  log-prior ) / s²
         //
         //  with s² = χ²_red at the optimum (same rescaling the covariance
-        //  uses) and the physical priors at face value — one pseudo-
-        //  observation each, NOT the inflated fitting weight.  Asymmetric
+        //  uses) and the physical priors at the same effective weight the
+        //  final LM cost applied (prior_weight × continuation scale ×
+        //  balance factor), so the sampled posterior peaks at the LM
+        //  optimum and cannot drift down prior-constrained directions
+        //  the fit itself respected.  Asymmetric
         //  1σ errors are the 15.9/84.1 percentile distances; derived
         //  quantities are computed per sample so correlations survive.
         // ═════════════════════════════════════════════════════════════════
         bool error_mcmc_ok = false;
+#ifdef HAVE_CUDA
+        const std::uint64_t error_mcmc_cuda_flux_before =
+            Lcurve::cuda_flux_evaluation_count();
+        const std::uint64_t error_mcmc_cuda_grid_before =
+            Lcurve::cuda_grid_evaluation_count();
+#endif
         if (config.value("lm_error_mcmc", true))
         {
-            const int emc_steps = config.value("lm_error_mcmc_steps", 8000);
-            const int emc_burn  = config.value("lm_error_mcmc_burn_in",
-                                               std::max(500, emc_steps / 4));
+            const int emc_steps_total =
+                config.value("lm_error_mcmc_steps", 8000);
+            const double mode_min_w =
+                config.value("lm_mode_min_weight", 0.005);
+            const int emc_min_steps =
+                config.value("lm_error_mcmc_min_steps", 500);
 
-            // Face-value priors for the posterior (weight overridable).
-            ObservedConstraints obs_err = obs;
-            obs_err.prior_weight =
-                config.value("lm_error_mcmc_prior_weight", 1.0);
-
-            // ── Proposal: Cholesky of the LM covariance, else diagonal ──
-            const double prop_sd = 2.38 / std::sqrt(double(npar));
-            vector<vector<double>> prop_L(npar, vector<double>(npar, 0.0));
-            bool use_chol = false;
-            if (has_covariance) {
-                vector<vector<double>> C = pcov.cov;
-                use_chol = true;
-                for (int i = 0; i < npar && use_chol; ++i) {
-                    for (int j = 0; j <= i; ++j) {
-                        double s = C[i][j];
-                        for (int k = 0; k < j; ++k)
-                            s -= prop_L[i][k] * prop_L[j][k];
-                        if (i == j) {
-                            if (s <= 0.0) { use_chol = false; break; }
-                            prop_L[i][j] = std::sqrt(s);
-                        } else {
-                            prop_L[i][j] = s / prop_L[j][j];
-                        }
-                    }
+            // ── Allocate chain length per mode ∝ posterior mass ─────────
+            //  Modes below mode_min_w are not sampled (still reported in
+            //  the modes list); sampled modes get at least emc_min_steps
+            //  so their local shape is resolved.
+            vector<int> sample_modes;
+            double wincl = 0.0;
+            for (size_t m = 0; m < modes.size(); ++m)
+                if (modes[m].weight >= mode_min_w) {
+                    sample_modes.push_back(static_cast<int>(m));
+                    wincl += modes[m].weight;
                 }
-            }
+            if (sample_modes.empty()) sample_modes.push_back(0);
+            vector<int> nsteps_mode(sample_modes.size());
+            for (size_t k = 0; k < sample_modes.size(); ++k)
+                nsteps_mode[k] = std::max(emc_min_steps,
+                    int(emc_steps_total * modes[sample_modes[k]].weight
+                        / std::max(wincl, 1e-300)));
+
+            // ── Global proposal fallback: adopted-mode covariance ────────
+            const double prop_sd = 2.38 / std::sqrt(double(npar));
             vector<double> diag_step(npar);
             for (int j = 0; j < npar; ++j) {
                 diag_step[j] = (has_covariance && sigma_par[j] > 0.0)
@@ -1595,11 +1953,29 @@ int main(int argc, char* argv[])
                                    : dsteps[j];
                 if (!(diag_step[j] > 0.0)) diag_step[j] = 1e-6;
             }
+            auto cholesky_of = [&](const vector<vector<double>>& C,
+                                   vector<vector<double>>& L) -> bool {
+                L.assign(npar, vector<double>(npar, 0.0));
+                for (int i = 0; i < npar; ++i) {
+                    for (int j = 0; j <= i; ++j) {
+                        double s = C[i][j];
+                        for (int k = 0; k < j; ++k)
+                            s -= L[i][k] * L[j][k];
+                        if (i == j) {
+                            if (s <= 0.0) return false;
+                            L[i][j] = std::sqrt(s);
+                        } else {
+                            L[i][j] = s / L[j][j];
+                        }
+                    }
+                }
+                return true;
+            };
 
             cout << "\n" << BRIGHT_CYAN
-                 << "─── Error-refinement MCMC (" << emc_steps
-                 << " steps, burn-in " << emc_burn << ", proposal: "
-                 << (use_chol ? "covariance Cholesky" : "diagonal")
+                 << "─── Error-refinement MCMC (" << emc_steps_total
+                 << " steps across " << sample_modes.size() << " mode"
+                 << (sample_modes.size() == 1 ? "" : "s")
                  << ", s² = " << fixed << setprecision(3) << err_s2
                  << ") ───" << RESET << endl;
 
@@ -1607,35 +1983,36 @@ int main(int argc, char* argv[])
             normal_distribution<> gauss(0.0, 1.0);
             uniform_real_distribution<> uni(0.0, 1.0);
 
-            auto log_prior_at = [&](const Subs::Array1D<double>& p) {
-                if (!use_priors) return 0.0;
-                return PhysicalPrior::compute(
-                    get_par(iangle_idx, model.iangle.value, p),
-                    get_par(q_idx,      model.q.value,      p),
-                    get_par(vs_idx,     model.velocity_scale.value, p),
-                    get_par(r1_idx,     model.r1.value,     p),
-                    get_par(r2_idx,     model.r2.value,     p),
-                    get_par(t1_idx,     model.t1.value,     p),
-                    get_par(t2_idx,     model.t2.value,     p),
-                    obs_err);
-            };
-
-            Subs::Array1D<double> cur = best_pars;
-            vector<double> r_tmp, f_tmp;
-            double chi_cur;
-            bool ok0 = compute_residuals(cur, r_tmp, chi_cur, f_tmp);
-            double lp_cur = log_prior_at(cur);
-
             vector<vector<double>> samples;
-            samples.reserve(std::max(0, emc_steps - emc_burn));
+            samples.reserve(emc_steps_total);
+            long accepted_total = 0, drawn_total = 0;
 
-            if (ok0) {
+            // ── One adaptive RWM chain confined to a mode ────────────────
+            auto run_error_chain = [&](const Subs::Array1D<double>& start,
+                                       const vector<vector<double>>* Cmode,
+                                       int nsteps, int nburn,
+                                       int& n_kept) -> bool
+            {
+                vector<vector<double>> prop_L;
+                bool use_chol = false;
+                if (Cmode) use_chol = cholesky_of(*Cmode, prop_L);
+                if (!use_chol && has_covariance)
+                    use_chol = cholesky_of(pcov.cov, prop_L);
+
+                Subs::Array1D<double> cur = start;
+                vector<double> r_tmp, f_tmp;
+                double chi_cur;
+                if (!compute_residuals(cur, r_tmp, chi_cur, f_tmp))
+                    return false;
+                double lp_cur = log_prior_at(cur);
+
                 double log_scale = 0.0;   // Robbins-Monro global scale
                 int    batch = 0, batch_acc = 0, batch_n = 0;
-                long   accepted_total = 0;
                 const int batch_size = 50;
+                n_kept = 0;
 
-                for (int step = 0; step < emc_steps; ++step) {
+                const int total_steps = nsteps + nburn;
+                for (int step = 0; step < total_steps; ++step) {
                     const double sf = std::exp(log_scale);
                     Subs::Array1D<double> prop = cur;
                     if (use_chol) {
@@ -1670,8 +2047,8 @@ int main(int argc, char* argv[])
                         double chi_prop;
                         if (compute_residuals(prop, r_tmp, chi_prop, f_tmp)) {
                             const double log_alpha =
-                                -0.5 * (chi_prop - chi_cur) / err_s2
-                                + (lp_prop - lp_cur);
+                                (-0.5 * (chi_prop - chi_cur)
+                                 + (lp_prop - lp_cur)) / err_s2;
                             if (log_alpha >= 0.0
                                 || std::log(uni(rng)) < log_alpha) {
                                 cur = prop;
@@ -1682,7 +2059,7 @@ int main(int argc, char* argv[])
                         }
                     }
 
-                    if (step < emc_burn) {
+                    if (step < nburn) {
                         ++batch_n;
                         if (acc) ++batch_acc;
                         if (batch_n >= batch_size) {
@@ -1698,31 +2075,68 @@ int main(int argc, char* argv[])
                         }
                     } else {
                         if (acc) ++accepted_total;
+                        ++drawn_total;
                         vector<double> row(npar);
                         for (int j = 0; j < npar; ++j) row[j] = cur[j];
                         samples.push_back(std::move(row));
+                        ++n_kept;
                     }
 
                     if (verbose && step % 500 == 0)
-                        cout << "\r  " << step << "/" << emc_steps
+                        cout << "\r    " << step << "/" << total_steps
                              << "  (scale x" << fixed << setprecision(3)
                              << std::exp(log_scale) << ")   " << flush;
                 }
+                return true;
+            };
 
-                const double acc_rate = samples.empty() ? 0.0
-                    : double(accepted_total) / samples.size();
-                cout << "\r  " << emc_steps << "/" << emc_steps
-                     << "  acceptance (post burn-in): "
-                     << fixed << setprecision(1) << 100.0 * acc_rate
-                     << "%          " << endl;
-
-                // A chain that never moved cannot yield percentiles.
-                error_mcmc_ok = samples.size() > 100 && acc_rate > 0.01;
-            } else {
-                cout << BRIGHT_YELLOW
-                     << "  Could not evaluate the optimum — error MCMC "
-                        "skipped." << RESET << endl;
+            for (size_t k = 0; k < sample_modes.size(); ++k) {
+                ModeInfo& m = modes[sample_modes[k]];
+                const LMRun& r = runs[m.run_idx];
+                const int nst = nsteps_mode[k];
+                const int nbr = std::max(300, nst / 5);
+                cout << "  mode " << sample_modes[k] + 1
+                     << ": mass " << fixed << setprecision(3) << m.weight
+                     << " → " << nst << " steps (+" << nbr << " burn-in)"
+                     << endl;
+                int kept = 0;
+                if (!run_error_chain(r.pars,
+                                     m.has_cov ? &m.cov : nullptr,
+                                     nst, nbr, kept))
+                    cout << BRIGHT_YELLOW
+                         << "    could not evaluate this mode — skipped."
+                         << RESET << endl;
+                m.n_samples = kept;
+                cout << "\r    done (" << kept << " samples kept)"
+                     << "                    " << endl;
             }
+
+            const double acc_rate = drawn_total == 0 ? 0.0
+                : double(accepted_total) / drawn_total;
+            cout << "  pooled: " << samples.size()
+                 << " samples, acceptance (post burn-in): "
+                 << fixed << setprecision(1) << 100.0 * acc_rate
+                 << "%" << endl;
+
+#ifdef HAVE_CUDA
+            const std::uint64_t cuda_flux_calls =
+                Lcurve::cuda_flux_evaluation_count()
+                - error_mcmc_cuda_flux_before;
+            const std::uint64_t cuda_grid_calls =
+                Lcurve::cuda_grid_evaluation_count()
+                - error_mcmc_cuda_grid_before;
+            if (cuda_flux_calls || cuda_grid_calls) {
+                cout << "  CUDA: " << cuda_flux_calls
+                     << " batched flux kernels, " << cuda_grid_calls
+                     << " star-grid kernels used by error-MCMC" << endl;
+            } else {
+                cout << "  CUDA: no error-MCMC kernels met the offload "
+                        "criteria; CPU fallback used" << endl;
+            }
+#endif
+
+            // A chain that never moved cannot yield percentiles.
+            error_mcmc_ok = samples.size() > 100 && acc_rate > 0.01;
 
             if (error_mcmc_ok) {
                 vector<double> point(npar);
@@ -1735,32 +2149,72 @@ int main(int argc, char* argv[])
 
                 // For a flat/offset chi² landscape the LM optimum can sit at
                 // or beyond the 16–84% posterior edge, flooring one side of
-                // its error to zero (ChainStats::summarize) — a sign the LM
-                // point is a poor stand-in for the posterior.  Re-anchor
-                // those parameters on the posterior median instead, and
-                // propagate the substitution into best_pars so every
-                // downstream consumer (implied quantities, the plotted
-                // light curve, the TeX report, lm_summary) reports the same
-                // adopted value that ASTRA receives via fit_results.
-                vector<int> adopted_median_idx;
+                // its error to zero (ChainStats::summarize).  Substituting
+                // the marginal posterior medians (the old behaviour) built
+                // jointly inconsistent — often unphysical — parameter sets,
+                // because per-parameter medians of correlated marginals do
+                // not lie on the degeneracy ridge the priors carve out.
+                // Keep the LM optimum (which respects the priors by
+                // construction) and instead quote one-sided errors anchored
+                // at it: the 68.27% quantile of the sample deviations above
+                // and below the adopted value.
+                vector<int> anchored_idx;
                 for (int j = 0; j < npar; ++j) {
-                    const double up = fr["sigma_up"][names[j]].get<double>();
-                    const double dn = fr["sigma_down"][names[j]].get<double>();
-                    if (up <= 0.0 || dn <= 0.0) {
-                        point[j] = fr["median"][names[j]].get<double>();
-                        adopted_median_idx.push_back(j);
+                    double up = fr["sigma_up"][names[j]].get<double>();
+                    double dn = fr["sigma_down"][names[j]].get<double>();
+                    if (up > 0.0 && dn > 0.0) continue;
+
+                    vector<double> above, below;
+                    for (const auto& srow : samples) {
+                        const double d = srow[j] - point[j];
+                        if (d > 0.0)      above.push_back(d);
+                        else if (d < 0.0) below.push_back(-d);
                     }
-                }
-                if (!adopted_median_idx.empty()) {
-                    for (int j : adopted_median_idx) best_pars[j] = point[j];
-                    fr = ChainStats::build_fit_results(
-                        "levmarq+mcmc",
-                        vector<string>(names.begin(), names.end()),
-                        point, samples, best_chisq, ndata, npar, err_s2);
+                    auto one_sided = [](vector<double>& v) -> double {
+                        if (v.size() < 20) return 0.0;
+                        const size_t k =
+                            static_cast<size_t>(0.6827 * (v.size() - 1));
+                        std::nth_element(v.begin(), v.begin() + k, v.end());
+                        return v[k];
+                    };
+                    up = one_sided(above);
+                    dn = one_sided(below);
+                    // A side the chain never explored: fall back to the
+                    // linearised σ, else mirror the populated side.
+                    const double lin = (has_covariance && sigma_par[j] > 0.0)
+                                           ? sigma_par[j] : 0.0;
+                    if (up <= 0.0) up = (lin > 0.0) ? lin : dn;
+                    if (dn <= 0.0) dn = (lin > 0.0) ? lin : up;
+                    fr["sigma_up"][names[j]]   = up;
+                    fr["sigma_down"][names[j]] = dn;
+                    fr["sigma"][names[j]]      = 0.5 * (up + dn);
+                    anchored_idx.push_back(j);
                 }
                 fr["converged"]   = converged;
                 fr["stop_reason"] = stop_reason;
                 fr["iterations"]  = total_iter;
+
+                // ── Multi-start mode breakdown ───────────────────────────
+                {
+                    json jmodes = json::array();
+                    for (auto& m : modes) {
+                        const LMRun& r = runs[m.run_idx];
+                        json jm;
+                        for (int j = 0; j < npar; ++j)
+                            jm["pars"][names[j]] = (double)r.pars[j];
+                        jm["chisq_lc"]  = r.chisq_lc;
+                        jm["sum_sq"]    = r.sum_sq;
+                        jm["weight"]    = m.weight;
+                        jm["n_runs"]    = m.n_runs;
+                        jm["n_samples"] = m.n_samples;
+                        jm["converged"] = r.converged;
+                        jmodes.push_back(jm);
+                    }
+                    fr["modes"]      = jmodes;
+                    fr["n_modes"]    = modes.size();
+                    fr["multimodal"] = multimodal;
+                    fr["n_starts"]   = starts.size();
+                }
 
                 if (config.contains("true_period")) {
                     const double P_days = config["true_period"].get<double>();
@@ -1793,10 +2247,10 @@ int main(int argc, char* argv[])
 
                 cout << BRIGHT_CYAN
                      << "Refined uncertainties (16/84% MCMC"
-                     << (adopted_median_idx.empty()
+                     << (anchored_idx.empty()
                              ? ", LM optimum"
-                             : ", posterior median where LM optimum "
-                               "fell outside the interval")
+                             : ", one-sided errors anchored at the LM "
+                               "optimum where it fell outside the interval")
                      << "):" << RESET << endl;
                 size_t mw = 0;
                 for (int j = 0; j < npar; ++j)
@@ -1813,13 +2267,15 @@ int main(int argc, char* argv[])
                              << RESET;
                     cout << endl;
                 }
-                for (int j : adopted_median_idx) {
+                for (int j : anchored_idx) {
                     cout << BRIGHT_YELLOW
                          << "  ⚠ " << names[j]
                          << ": LM optimum lay outside the 16–84% posterior"
-                            " interval — adopted the posterior median "
-                         << setprecision(6) << best_pars[j]
-                         << " (and its percentile errors) instead."
+                            " interval — kept the LM value and quoted "
+                            "one-sided percentile errors anchored at it "
+                            "(posterior median: "
+                         << setprecision(6)
+                         << fr["median"][names[j]].get<double>() << ")."
                          << RESET << endl;
                 }
             }
@@ -1842,6 +2298,25 @@ int main(int argc, char* argv[])
                 fr["sigma"][names[j]]      = sigma_par[j];
                 fr["sigma_up"][names[j]]   = sigma_par[j];
                 fr["sigma_down"][names[j]] = sigma_par[j];
+            }
+            {
+                json jmodes = json::array();
+                for (auto& m : modes) {
+                    const LMRun& r = runs[m.run_idx];
+                    json jm;
+                    for (int j = 0; j < npar; ++j)
+                        jm["pars"][names[j]] = (double)r.pars[j];
+                    jm["chisq_lc"]  = r.chisq_lc;
+                    jm["sum_sq"]    = r.sum_sq;
+                    jm["weight"]    = m.weight;
+                    jm["n_runs"]    = m.n_runs;
+                    jm["converged"] = r.converged;
+                    jmodes.push_back(jm);
+                }
+                fr["modes"]      = jmodes;
+                fr["n_modes"]    = modes.size();
+                fr["multimodal"] = multimodal;
+                fr["n_starts"]   = starts.size();
             }
             config["fit_results"] = fr;
         }
@@ -1888,13 +2363,14 @@ int main(int argc, char* argv[])
             string log_path = config.value("lm_log_path", "lm_iter_log.txt");
             ofstream logf(log_path);
             logf << "iter,sum_sq,chisq_lc,lambda,step_norm,gain_ratio,"
-                << "fev,prior_scale,status\n";
+                << "fev,prior_scale,status,run\n";
             for (auto& e : iter_log) {
                 logf << e.iter << "," << e.sum_sq << "," << e.chisq_lc
                     << "," << e.lambda << "," << e.step_norm
                     << "," << e.gain_ratio << "," << e.fev
                     << "," << e.prior_scale
-                    << "," << e.status << "\n";
+                    << "," << e.status
+                    << "," << e.run << "\n";
             }
             logf.close();
             cout << "Iteration log written to " << log_path << endl;
@@ -1909,9 +2385,10 @@ int main(int argc, char* argv[])
             double wd0, chisq0, wn0, lg10, lg20, rv10, rv20;
             Lcurve::light_curve_comp(model, data, scale, !no_file, false, sfac,
                                     final_fit, wd0, chisq0, wn0,
-                                    lg10, lg20, rv10, rv20);
+                                    lg10, lg20, rv10, rv20, false);
             if (plotting)
-                Helpers::plot_model(data, final_fit, no_file, copy, device);
+                Helpers::plot_model_live(data, final_fit, no_file, copy,
+                                         *gp_ptr);
 
             string sout = config["output_file_path"].get<string>();
             for (long unsigned int i = 0; i < data.size(); ++i)
@@ -1931,6 +2408,9 @@ int main(int argc, char* argv[])
             lm_summary["best_chisq_lc"]    = best_chisq;
             lm_summary["best_sum_sq"]      = best_sum_sq;
             lm_summary["final_lambda"]     = lambda;
+            lm_summary["n_starts"]         = starts.size();
+            lm_summary["n_modes"]          = modes.size();
+            lm_summary["multimodal"]       = multimodal;
             for (int i = 0; i < npar; ++i)
                 lm_summary["best_pars"][names[i]] = (double)best_pars[i];
             config["lm_summary"] = lm_summary;
