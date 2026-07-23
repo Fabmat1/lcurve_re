@@ -4,6 +4,9 @@
 #include "constants.h"
 #include "../lroche_base/roche.h"
 #include "lcurve.h"
+#ifdef HAVE_CUDA
+#include "set_star_grid_cuda.h"
+#endif
 
 #ifdef _OPENMP
   #include <omp.h>
@@ -251,6 +254,9 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
     // vector of offsets needed for parallelisation as opposed
     // to counting up on the fly.
     std::vector<int> off(nlat);
+#ifdef HAVE_CUDA
+    const int first_face = nface;
+#endif
 
     double sint;
     for(int nt=0; nt<nlat; nt++){
@@ -269,19 +275,11 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
         }
     }
 
-    bool failed = false;
-    std::string error_message;
-
-#ifdef _OPENMP
-    int mxth = std::min(16, omp_get_max_threads());
-    omp_set_num_threads(mxth);
-#pragma omp parallel for schedule(dynamic)
-#endif
-
-    for(int nt=0; nt<nlat; nt++){
-
-        double phi1, phi2, theta, sint, cost;
-        int nphi, nl;
+    // Decode the geometry of a latitude ring in one place; both the CUDA
+    // whole-grid path and the scalar fallback use this exact mapping.
+    auto ring_geometry = [&](int nt, double &theta, double &sint,
+                             double &cost, int &nphi, int &nl,
+                             double &phi1, double &phi2) {
         if(infill){
             if(nt < nlat1){
                 theta = tlo + (thi-tlo)*(nt+0.5)/nlat1;
@@ -319,6 +317,52 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
             phi1 = 0.;
             phi2 = Constants::TWOPI;
         }
+    };
+
+#ifdef HAVE_CUDA
+    if(cuda_star_grid_enabled()){
+        const int nsegment = nface - first_face;
+        std::vector<double> gdx(nsegment), gdy(nsegment), gdz(nsegment);
+        std::vector<double> area_scale(nsegment);
+        #pragma omp parallel for schedule(static)
+        for(int nt=0; nt<nlat; ++nt){
+            double phi1, phi2, theta, sint, cost;
+            int nphi, nl;
+            ring_geometry(nt, theta, sint, cost, nphi, nl, phi1, phi2);
+            for(int np=0; np<nphi; ++np){
+                double phi = phi1 + (phi2-phi1)*(np+0.5)/nphi;
+                double sinp = sin(phi), cosp = cos(phi);
+                int i = off[nt] - first_face + np;
+                if(npole){
+                    gdx[i] = sint*cosp; gdy[i] = sint*sinp; gdz[i] = cost;
+                }else{
+                    gdx[i] = cost; gdy[i] = sint*cosp; gdz[i] = sint*sinp;
+                }
+                area_scale[i] = (phi2-phi1)/nphi*sint * (thi-tlo)/nl;
+            }
+        }
+        if(cuda_build_star_faces(star, first_face, gdx, gdy, gdz, area_scale,
+                                 which_star, q, iangle, r1, r2, rref1, rref2,
+                                 roche1, roche2, spin1, spin2, eclipse, gref,
+                                 pref1, pref2, delta))
+            return;
+    }
+#endif
+
+    bool failed = false;
+    std::string error_message;
+
+#ifdef _OPENMP
+    int mxth = std::min(16, omp_get_max_threads());
+    omp_set_num_threads(mxth);
+#pragma omp parallel for schedule(dynamic)
+#endif
+
+    for(int nt=0; nt<nlat; nt++){
+
+        double phi1, phi2, theta, sint, cost;
+        int nphi, nl;
+        ring_geometry(nt, theta, sint, cost, nphi, nl, phi1, phi2);
 
         // Eclipse computation for one point. We calculate whether a point
         // is eclipsed, and, if it is, its ingress and egress phases.
@@ -355,8 +399,10 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
         const bool roche_solve =
             (which_star == Roche::PRIMARY && roche1) ||
             (which_star == Roche::SECONDARY && roche2);
-        std::vector<double> bdx, bdy, bdz, brad;
-        std::vector<unsigned char> bfail;
+        // One workspace per OpenMP worker avoids thousands of small heap
+        // allocations while successive MCMC proposals rebuild the grids.
+        static thread_local std::vector<double> bdx, bdy, bdz, brad;
+        static thread_local std::vector<unsigned char> bfail;
         if(roche_solve){
             bdx.resize(nhalf); bdy.resize(nhalf); bdz.resize(nhalf);
             brad.resize(nhalf); bfail.resize(nhalf);
@@ -385,15 +431,20 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
         for(int np=0; np < nhalf; np++){
 
             try{
-                double phi  = phi1 + (phi2-phi1)*(np+0.5)/nphi;
-                double sinp = sin(phi);
-                double cosp = cos(phi);
-
                 Subs::Vec3 dirn, posn, dvec;
-                if(npole){
-                    dirn.set(sint*cosp, sint*sinp, cost);
+                if(roche_solve){
+                    // The batched solve already computed these directions;
+                    // reuse them rather than evaluating sin/cos twice per
+                    // face on every solver iteration.
+                    dirn.set(bdx[np], bdy[np], bdz[np]);
                 }else{
-                    dirn.set(cost, sint*cosp, sint*sinp);
+                    double phi  = phi1 + (phi2-phi1)*(np+0.5)/nphi;
+                    double sinp = sin(phi);
+                    double cosp = cos(phi);
+                    if(npole)
+                        dirn.set(sint*cosp, sint*sinp, cost);
+                    else
+                        dirn.set(cost, sint*cosp, sint*sinp);
                 }
 
                 // Direction is now defined, so calculate radius and thus the

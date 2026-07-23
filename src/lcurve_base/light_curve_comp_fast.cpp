@@ -11,7 +11,8 @@ void Lcurve::light_curve_comp_fast(const Lcurve::Model &mdl,
                                    double &chisq, double &wnok,
                                    double &logg1, double &logg2, 
                                    double &rv1, double &rv2,
-                                   int max_model_points) {
+                                   int max_model_points,
+                                   bool diagnostics) {
     
     // Determine if we need to subsample
     size_t n_data = data.size();
@@ -20,7 +21,8 @@ void Lcurve::light_curve_comp_fast(const Lcurve::Model &mdl,
     if (!need_interpolation) {
         // Use standard computation if data points are few
         light_curve_comp(mdl, data, scale, rdata, info, sfac, calc, 
-                        wdwarf, chisq, wnok, logg1, logg2, rv1, rv2);
+                        wdwarf, chisq, wnok, logg1, logg2, rv1, rv2,
+                        diagnostics);
         return;
     }
 
@@ -38,7 +40,8 @@ void Lcurve::light_curve_comp_fast(const Lcurve::Model &mdl,
     // Compute model at sample points
     std::vector<double> model_calc;
     light_curve_comp(mdl, model_data, scale, rdata, info, sfac, model_calc,
-                    wdwarf, chisq, wnok, logg1, logg2, rv1, rv2);
+                    wdwarf, chisq, wnok, logg1, logg2, rv1, rv2,
+                    diagnostics);
     
     // Interpolate to all data points
     calc.resize(n_data);

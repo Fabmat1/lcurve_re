@@ -57,7 +57,7 @@ All binaries live in `build/` after compilation.
 
   /* --- global switches -------------------------------------------- */
   "autoscale"         : true,        // let the code re-scale the model to χ² min
-  "plot_device"       : "qt",        // qt | wxt | x11 | pngcairo | none
+  "plot_device"       : "qt",        // qt | wxt | x11 | stream | none
   "seed"              : -123456,     // RNG seed  (negative = random)
 
   /* --- noise / fake data block ------------------------------------ */
@@ -91,6 +91,14 @@ All binaries live in `build/` after compilation.
    factors when `iscale=true` in the model) is fitted to minimise χ².  
 •  `plot_device : "none"` turns off all gnuplot calls – useful for
    headless clusters.
+•  `plot_device : "stream"` also avoids launching gnuplot and emits live,
+   line-delimited plot frames on standard output. Each frame starts with
+   `@@LCURVE_PLOT@@` and contains a compact `lcurve.plot.v1` JSON object with
+   `x`, `flux`, `error`, `model`, `residual`, and progress metadata. Parent
+   applications can strip these records from normal terminal output and draw
+   them with their native plotting widget. `plot_update_interval` controls
+   LM/MCMC frame cadence; `error_plot_update_interval` controls the short
+   error-refinement MCMC cadence.
 
 ---
 
@@ -119,7 +127,8 @@ lcurve_re/
 ## 5 Dependencies
 
 Run-time  
-• gnuplot (≥ 5.0) – only when `plot_device` ≠ "none"
+• gnuplot (≥ 5.0) – only for graphical `plot_device` values; `none` and
+  `stream` never launch it
 
 Build-time  
 • CMake ≥ 3.14  
@@ -132,7 +141,34 @@ All third-party headers are vendored – nothing is fetched at build time.
 
 ---
 
-## 6 Typical workflow
+## 6 CUDA acceleration
+
+When an NVIDIA CUDA compiler is installed, CMake builds optional GPU kernels
+for the batched stellar flux and whole Roche-grid/eclipsing calculation:
+
+```bash
+cmake -B build-cuda -DCMAKE_BUILD_TYPE=Release \
+  -DGNUPLOT_IOSTREAM_INCLUDE_DIR=/path/to/header/parent \
+  -DLCURVE_ENABLE_CUDA=ON
+cmake --build build-cuda -j$(nproc)
+
+LCURVE_CUDA=1 ./build-cuda/lcurve_mcmc config.json
+```
+
+CUDA is runtime opt-in; without `LCURVE_CUDA=1` the same binary uses the
+original CPU/OpenMP path. The accelerated path uses FP32 for per-face work and
+FP64 for accumulation and numerically sensitive tiny-star eclipse boundaries.
+`LCURVE_CUDA_PRECISION=double` selects FP64 flux arithmetic, while
+`LCURVE_CUDA_GRID=0` disables only whole-grid offload. If the driver or device
+is unavailable, execution falls back to the CPU automatically.
+
+Use `LCURVE_CUDA_GRID_VALIDATE=1` with the direct evaluator to compare every
+GPU eclipse interval against the CPU implementation for a model. This is a
+validation mode and is intentionally slow.
+
+---
+
+## 7 Typical workflow
 
 1.  Prepare a first-guess configuration  
     `cp examples/template.json myrun.json`  

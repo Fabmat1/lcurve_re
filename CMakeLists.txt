@@ -10,6 +10,8 @@ cmake_policy(SET CMP0167 NEW)  # Use modern Boost support
 option(LCURVE_ENABLE_CUDA     "Enable CUDA support if available"  ON)
 option(LCURVE_STRICT          "Fail the build on any warning"  OFF)
 option(LCURVE_ENABLE_ASAN     "Build with address/UB sanitiser" OFF)
+set(LCURVE_CUDA_ARCHITECTURES "75-real;80-real;86" CACHE STRING
+    "CUDA architectures (Turing, Ampere, plus forward-compatible Ampere PTX)")
 
 # Check for CUDA using the modern approach (only if enabled)
 if(LCURVE_ENABLE_CUDA)
@@ -18,7 +20,6 @@ if(LCURVE_ENABLE_CUDA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
         add_definitions(-DHAVE_CUDA)
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -arch=sm_70")
         set(CUDA_FOUND TRUE)
         
         # Find CUDA toolkit for libraries
@@ -72,6 +73,8 @@ set(SOURCES
         src/lcurve_base/constants.h
         src/lcurve_base/comp_light.cpp
         src/lcurve_base/comp_light_flat.cpp
+        src/lcurve_base/comp_light_cuda.h
+        src/lcurve_base/set_star_grid_cuda.h
         src/lcurve_base/set_star_grid.cpp
         src/lcurve_base/set_star_continuum.cpp
         src/lcurve_base/set_disc_grid.cpp
@@ -113,6 +116,12 @@ set(SOURCES
         src/grid_cache.h
 )
 
+if(CUDA_FOUND)
+    list(APPEND SOURCES
+        src/lcurve_base/comp_light_cuda.cu
+        src/lcurve_base/set_star_grid_cuda.cu)
+endif()
+
 add_library(utilities STATIC ${SOURCES})
 
 find_package(OpenMP REQUIRED)          # looks for the compiler's OpenMP support
@@ -121,7 +130,10 @@ target_link_libraries(utilities PRIVATE OpenMP::OpenMP_CXX)
 # Link CUDA runtime if found
 if(CUDA_FOUND)
     target_link_libraries(utilities PRIVATE CUDA::cudart)
-    set_property(TARGET utilities PROPERTY CUDA_ARCHITECTURES 70)
+    set_target_properties(utilities PROPERTIES
+        CUDA_ARCHITECTURES "${LCURVE_CUDA_ARCHITECTURES}"
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON)
 endif()
 
 add_executable(lcurve_re main.cpp)
@@ -178,6 +190,13 @@ endif()
 set(_RELEASE_FLAGS "")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     list(APPEND _RELEASE_FLAGS -march=native -funroll-loops)
+
+    # The explicit SIMD flux kernels clamp all square-root inputs and the
+    # program never observes math errno. Disabling only errno semantics lets
+    # GCC use packed square roots without enabling unsafe reassociation.
+    set_property(SOURCE src/lcurve_base/comp_light_flat.cpp APPEND PROPERTY
+        COMPILE_OPTIONS
+            "$<$<CONFIG:Release>:-fno-math-errno>")
 endif()
 
 # Link-time optimisation for Release builds (lets rpot & friends inline
@@ -219,7 +238,8 @@ endif()
 # ─── HELPER FUNCTION TO APPLY EVERYTHING TO A TARGET ──────────────
 function(lcurve_setup_target TGT)
     # Core warnings
-    target_compile_options(${TGT} PRIVATE ${_COMMON_WARNINGS} ${_WERROR})
+    target_compile_options(${TGT} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:${_COMMON_WARNINGS};${_WERROR}>")
 
     # Sanitiser flags (compile + link)
     if(_SAN_FLAGS)
@@ -232,7 +252,7 @@ function(lcurve_setup_target TGT)
     # Release optimisation flags
     if(_RELEASE_FLAGS)
         target_compile_options(${TGT} PRIVATE
-            $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
+            "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:${_RELEASE_FLAGS}>")
         target_link_options(${TGT} PRIVATE
             $<$<CONFIG:Release>:${_RELEASE_FLAGS}>)
     endif()

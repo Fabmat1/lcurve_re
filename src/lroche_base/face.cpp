@@ -73,6 +73,8 @@ void Roche::face_chop_batch(double q, STAR star, double spin,
                             int n, double rref, double pref, double acc,
                             double* rad, unsigned char* fail){
 
+    (void)dz; // unit-vector identity makes the explicit z component redundant
+
     const double mu = q / (1 + q);
     const double comp = 1. - mu;
     const double spin_sq = spin * spin;
@@ -81,19 +83,29 @@ void Roche::face_chop_batch(double q, STAR star, double spin,
 
     // Roche potential along ray i at radius r; same expressions as RayPot
     auto pot = [&](int i, double r) -> double {
-        double px = cx + r * dx[i];
+        double rdx = r * dx[i];
+        double px = cx + rdx;
         double py = r * dy[i];
-        double pz = r * dz[i];
         double x2y2 = px * px + py * py;
-        double r1sq = x2y2 + pz * pz;
-        double d1 = sqrt(r1sq);
-        double d2 = sqrt(r1sq + 1. - 2. * px);
+        double rr = r * r;
+        // dir is a unit vector and r is positive: the distance to the star
+        // whose face is being solved is exactly r. Only the distance to the
+        // companion needs a square root. This removes one sqrt from every
+        // binary-chop iteration (the dominant grid-construction cost).
+        double down = r;
+        double dcomp = sqrt(rr + 1. + (primary ? -2. : 2.) * rdx);
         if (primary)
-            return -comp / d1 - mu / d2 - spin_sq * x2y2 / 2. + mu * px;
-        return -comp / d1 - mu / d2 - spin_sq * (0.5 + 0.5 * x2y2 - px) - comp * px;
+            return -comp / down - mu / dcomp
+                   - spin_sq * x2y2 / 2. + mu * px;
+        return -comp / dcomp - mu / down
+               - spin_sq * (0.5 + 0.5 * x2y2 - px) - comp * px;
     };
 
-    std::vector<double> r1(n), r2(n), tref(n);
+    // This function is called once per latitude ring. Reuse its scratch
+    // storage on each outer-grid worker instead of allocating three vectors
+    // for every ring and every solver evaluation.
+    static thread_local std::vector<double> r1, r2, tref;
+    r1.resize(n); r2.resize(n); tref.resize(n);
 
     // Reference-radius sanity check (scalar face() throws here)
     #pragma omp simd
