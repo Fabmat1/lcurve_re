@@ -346,7 +346,43 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
         // rings are symmetric about that plane, so only half of each ring
         // needs the expensive Roche::face solve; the partner face is its
         // mirror image. Eclipse phases are still computed per face.
-        for(int np=0; np < (nphi+1)/2; np++){
+        const int nhalf = (nphi+1)/2;
+
+        // Solve the face radii for the whole ring in one SIMD batch; each
+        // lane repeats the scalar Roche::face iteration exactly. Lanes the
+        // scalar routine would reject are re-run through it below so the
+        // original exception surfaces.
+        const bool roche_solve =
+            (which_star == Roche::PRIMARY && roche1) ||
+            (which_star == Roche::SECONDARY && roche2);
+        std::vector<double> bdx, bdy, bdz, brad;
+        std::vector<unsigned char> bfail;
+        if(roche_solve){
+            bdx.resize(nhalf); bdy.resize(nhalf); bdz.resize(nhalf);
+            brad.resize(nhalf); bfail.resize(nhalf);
+            for(int np=0; np < nhalf; np++){
+                double phi  = phi1 + (phi2-phi1)*(np+0.5)/nphi;
+                double sinp = sin(phi);
+                double cosp = cos(phi);
+                if(npole){
+                    bdx[np] = sint*cosp; bdy[np] = sint*sinp; bdz[np] = cost;
+                }else{
+                    bdx[np] = cost; bdy[np] = sint*cosp; bdz[np] = sint*sinp;
+                }
+            }
+            if(which_star == Roche::PRIMARY)
+                Roche::face_chop_batch(q, Roche::PRIMARY, spin1,
+                                       bdx.data(), bdy.data(), bdz.data(),
+                                       nhalf, rref1, pref1, ACC,
+                                       brad.data(), bfail.data());
+            else
+                Roche::face_chop_batch(q, Roche::SECONDARY, spin2,
+                                       bdx.data(), bdy.data(), bdz.data(),
+                                       nhalf, rref2, pref2, ACC,
+                                       brad.data(), bfail.data());
+        }
+
+        for(int np=0; np < nhalf; np++){
 
             try{
                 double phi  = phi1 + (phi2-phi1)*(np+0.5)/nphi;
@@ -365,10 +401,23 @@ void Lcurve::add_faces(vector<Lcurve::Point>& star, int& nface, double tlo, doub
                 // geometry or not.
                 double rad, gravity, area;
 
-                if(which_star == Roche::PRIMARY && roche1){
-                    Roche::face(q, Roche::PRIMARY, spin1, dirn, rref1, pref1, ACC, posn, dvec, rad, gravity);
-                }else if(which_star == Roche::SECONDARY && roche2){
-                    Roche::face(q, Roche::SECONDARY, spin2, dirn, rref2, pref2, ACC, posn, dvec, rad, gravity);
+                if(roche_solve){
+                    if(bfail[np]){
+                        // reproduce the scalar routine's exception
+                        if(which_star == Roche::PRIMARY)
+                            Roche::face(q, Roche::PRIMARY, spin1, dirn, rref1, pref1, ACC, posn, dvec, rad, gravity);
+                        else
+                            Roche::face(q, Roche::SECONDARY, spin2, dirn, rref2, pref2, ACC, posn, dvec, rad, gravity);
+                    }else{
+                        // finish exactly as Roche::face does from the solved radius
+                        rad  = brad[np];
+                        posn = (which_star == Roche::PRIMARY ? cofm1 : cofm2) + rad*dirn;
+                        dvec = (which_star == Roche::PRIMARY)
+                                   ? Roche::drpot1(q, spin1, posn)
+                                   : Roche::drpot2(q, spin2, posn);
+                        gravity = dvec.length();
+                        dvec   /= gravity;
+                    }
                 }else{
 
                     // Ignore Roche distortion

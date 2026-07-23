@@ -244,6 +244,16 @@ namespace Roche {
               double rref, double pref, double acc, Subs::Vec3& pvec,
               Subs::Vec3& dvec, double& r, double& g);
 
+    //! Batched radius solve of face() for many directions at once.
+    //! Runs the same bracket + binary-chop per direction in SIMD lockstep;
+    //! each lane reproduces the scalar iteration sequence. Lanes that the
+    //! scalar face() would reject get fail[i]=1 (rad[i] undefined there);
+    //! the caller should re-run face() on those to raise the exact error.
+    void face_chop_batch(double q, STAR star, double spin,
+                         const double* dx, const double* dy, const double* dz,
+                         int n, double rref, double pref, double acc,
+                         double* rad, unsigned char* fail);
+
     //! Function object for carrying out line minimisation in phi lambda space
     class Rpot : public Subs::Sfunc {
 

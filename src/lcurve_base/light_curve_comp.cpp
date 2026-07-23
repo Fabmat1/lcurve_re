@@ -67,7 +67,11 @@ GeomKey make_geom_key(const Lcurve::Model &m) {
     k.r1 = m.r1.value; k.r2 = m.r2.value;
     k.cphi3 = m.cphi3.value; k.cphi4 = m.cphi4.value;
     k.spin1 = m.spin1.value; k.spin2 = m.spin2.value;
-    k.velocity_scale = m.velocity_scale.value; k.tperiod = m.tperiod;
+    // velocity_scale/tperiod only shape the grids through the lensing
+    // correction; without lensing the geometry is independent of them,
+    // so key them out to keep cache hits on e.g. velocity_scale steps.
+    k.velocity_scale = m.glens1 ? m.velocity_scale.value : 0.;
+    k.tperiod = m.glens1 ? m.tperiod : 0.;
     k.llo = m.llo; k.lhi = m.lhi; k.lfudge = m.lfudge;
     k.delta_phase = m.delta_phase;
     k.phase1 = m.phase1; k.phase2 = m.phase2;

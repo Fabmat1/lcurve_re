@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <vector>
 #include "../new_subs.h"
 #include "roche.h"
 
@@ -61,6 +62,91 @@ struct RayPot {
 };
 
 } // unnamed namespace
+
+/* Batched version of the radius solve inside face(): the reference-radius
+ * check, the halving search and the binary chop are run for all directions
+ * in lockstep, with inactive lanes masked out, so each lane performs the
+ * same arithmetic sequence as the scalar routine while the compiler
+ * vectorises across lanes. */
+void Roche::face_chop_batch(double q, STAR star, double spin,
+                            const double* dx, const double* dy, const double* dz,
+                            int n, double rref, double pref, double acc,
+                            double* rad, unsigned char* fail){
+
+    const double mu = q / (1 + q);
+    const double comp = 1. - mu;
+    const double spin_sq = spin * spin;
+    const double cx = (star == PRIMARY) ? 0. : 1.;
+    const bool primary = (star == PRIMARY);
+
+    // Roche potential along ray i at radius r; same expressions as RayPot
+    auto pot = [&](int i, double r) -> double {
+        double px = cx + r * dx[i];
+        double py = r * dy[i];
+        double pz = r * dz[i];
+        double x2y2 = px * px + py * py;
+        double r1sq = x2y2 + pz * pz;
+        double d1 = sqrt(r1sq);
+        double d2 = sqrt(r1sq + 1. - 2. * px);
+        if (primary)
+            return -comp / d1 - mu / d2 - spin_sq * x2y2 / 2. + mu * px;
+        return -comp / d1 - mu / d2 - spin_sq * (0.5 + 0.5 * x2y2 - px) - comp * px;
+    };
+
+    std::vector<double> r1(n), r2(n), tref(n);
+
+    // Reference-radius sanity check (scalar face() throws here)
+    #pragma omp simd
+    for (int i = 0; i < n; i++) {
+        fail[i] = pot(i, rref) < pref ? 1 : 0;
+        r1[i]   = rref / 2;
+        r2[i]   = rref;
+        tref[i] = pref + 1.;
+    }
+
+    // Halving search for a radius below the reference potential
+    const int MAXSEARCH = 30;
+    for (int it = 0; it < MAXSEARCH; it++) {
+        int nact = 0;
+        #pragma omp simd reduction(+:nact)
+        for (int i = 0; i < n; i++) {
+            if (!fail[i] && tref[i] > pref) {
+                r1[i] = r2[i] / 2;
+                double t = pot(i, r1[i]);
+                tref[i] = t;
+                if (t > pref) r2[i] = r1[i];
+                nact++;
+            }
+        }
+        if (nact == 0) break;
+    }
+    for (int i = 0; i < n; i++)
+        if (!fail[i] && tref[i] > pref) fail[i] = 2;
+
+    // Binary chop, all lanes in lockstep
+    const int MAXCHOP = 100;
+    int nchop = 0;
+    for (; nchop < MAXCHOP; nchop++) {
+        int nact = 0;
+        #pragma omp simd reduction(+:nact)
+        for (int i = 0; i < n; i++) {
+            if (!fail[i] && r2[i] - r1[i] > acc) {
+                double r = (r1[i] + r2[i]) / 2.;
+                if (pot(i, r) < pref)
+                    r1[i] = r;
+                else
+                    r2[i] = r;
+                nact++;
+            }
+        }
+        if (nact == 0) break;
+    }
+    #pragma omp simd
+    for (int i = 0; i < n; i++) {
+        if (!fail[i] && r2[i] - r1[i] > acc) fail[i] = 3;
+        rad[i] = (r1[i] + r2[i]) / 2.;
+    }
+}
 
 void Roche::face(double q, STAR star, double spin, const Subs::Vec3& dirn, double rref, double pref, double acc,
                  Subs::Vec3& pvec, Subs::Vec3& dvec, double& r, double& g){

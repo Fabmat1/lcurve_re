@@ -235,52 +235,55 @@ void sum_star1_multi_t(const FlatGrid &fg, const Lcurve::PhaseBatch &pb,
     const long nblk = static_cast<long>((n + FACE_BLOCK - 1) / FACE_BLOCK);
     std::fill(out, out + nent, 0.0);
 
-    #pragma omp parallel if(!omp_in_parallel())
-    {
-        std::vector<double> acc(nent, 0.0);
-        #pragma omp for schedule(dynamic) nowait
-        for (long b = 0; b < nblk; b++) {
-            const size_t lo = b * FACE_BLOCK;
-            const size_t hi = std::min(n, lo + FACE_BLOCK);
-            const size_t a1 = std::min(hi, n0);            // plain segment
-            const size_t b0 = std::max(lo, n0);            // 1-range segment
-            const size_t b1 = std::min(hi, n1);
-            const size_t c0 = std::max(lo, n1);            // ragged segment
+    // Per-block partial sums merged in fixed block order: each block's row
+    // is the same arithmetic no matter which thread runs it, so the result
+    // is independent of scheduling and thread count (bitwise reproducible).
+    std::vector<double> blk(static_cast<size_t>(nblk) * nent);
+    #pragma omp parallel for schedule(dynamic) if(!omp_in_parallel())
+    for (long b = 0; b < nblk; b++) {
+        double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        const size_t lo = b * FACE_BLOCK;
+        const size_t hi = std::min(n, lo + FACE_BLOCK);
+        const size_t a1 = std::min(hi, n0);            // plain segment
+        const size_t b0 = std::max(lo, n0);            // 1-range segment
+        const size_t b1 = std::min(hi, n1);
+        const size_t c0 = std::max(lo, n1);            // ragged segment
 
-            for (int k = 0; k < nent; k++) {
-                const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
-                const double phin = pb.phin[k];
-                double s = 0.0;
+        for (int k = 0; k < nent; k++) {
+            const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
+            const double phin = pb.phin[k];
+            double s = 0.0;
 
-                #pragma omp simd reduction(+:s)
-                for (size_t i = lo; i < a1; i++)
+            #pragma omp simd reduction(+:s)
+            for (size_t i = lo; i < a1; i++)
+                s += s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L, beam,
+                                          spin, VFAC, XCOFM);
+
+            #pragma omp simd reduction(+:s)
+            for (size_t i = b0; i < b1; i++) {
+                double v = s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L,
+                                                beam, spin, VFAC, XCOFM);
+                s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
+                         ? 0.0 : v;
+            }
+
+            for (size_t i = c0; i < hi; i++) {
+                bool ecl = false;
+                for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
+                    if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
+                        ecl = true;
+                        break;
+                    }
+                if (!ecl)
                     s += s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L, beam,
                                               spin, VFAC, XCOFM);
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = b0; i < b1; i++) {
-                    double v = s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L,
-                                                    beam, spin, VFAC, XCOFM);
-                    s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
-                             ? 0.0 : v;
-                }
-
-                for (size_t i = c0; i < hi; i++) {
-                    bool ecl = false;
-                    for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
-                        if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
-                            ecl = true;
-                            break;
-                        }
-                    if (!ecl)
-                        s += s1_elem<LTYPE, BEAM>(g, i, ex, ey, ez, L, beam,
-                                                  spin, VFAC, XCOFM);
-                }
-                acc[k] += s;
             }
+            brow[k] = s;
         }
-        #pragma omp critical
-        for (int k = 0; k < nent; k++) out[k] += acc[k];
+    }
+    for (long b = 0; b < nblk; b++) {
+        const double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        for (int k = 0; k < nent; k++) out[k] += brow[k];
     }
 }
 
@@ -294,56 +297,57 @@ void sum_star2_multi_t(const FlatGrid &fg, const Lcurve::PhaseBatch &pb,
     const long nblk = static_cast<long>((n + FACE_BLOCK - 1) / FACE_BLOCK);
     std::fill(out, out + nent, 0.0);
 
-    #pragma omp parallel if(!omp_in_parallel())
-    {
-        std::vector<double> acc(nent, 0.0);
-        #pragma omp for schedule(dynamic) nowait
-        for (long b = 0; b < nblk; b++) {
-            const size_t lo = b * FACE_BLOCK;
-            const size_t hi = std::min(n, lo + FACE_BLOCK);
-            const size_t a1 = std::min(hi, n0);
-            const size_t b0 = std::max(lo, n0);
-            const size_t b1 = std::min(hi, n1);
-            const size_t c0 = std::max(lo, n1);
+    // Deterministic merge: see sum_star1_multi_t.
+    std::vector<double> blk(static_cast<size_t>(nblk) * nent);
+    #pragma omp parallel for schedule(dynamic) if(!omp_in_parallel())
+    for (long b = 0; b < nblk; b++) {
+        double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        const size_t lo = b * FACE_BLOCK;
+        const size_t hi = std::min(n, lo + FACE_BLOCK);
+        const size_t a1 = std::min(hi, n0);
+        const size_t b0 = std::max(lo, n0);
+        const size_t b1 = std::min(hi, n1);
+        const size_t c0 = std::max(lo, n1);
 
-            for (int k = 0; k < nent; k++) {
-                const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
-                const double phin = pb.phin[k];
-                double s = 0.0;
+        for (int k = 0; k < nent; k++) {
+            const double ex = pb.ex[k], ey = pb.ey[k], ez = pb.ez[k];
+            const double phin = pb.phin[k];
+            double s = 0.0;
 
-                #pragma omp simd reduction(+:s)
-                for (size_t i = lo; i < a1; i++)
+            #pragma omp simd reduction(+:s)
+            for (size_t i = lo; i < a1; i++)
+                s += s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez, L,
+                                                 beam, spin, VFAC,
+                                                 XCOFM, rlens1);
+
+            #pragma omp simd reduction(+:s)
+            for (size_t i = b0; i < b1; i++) {
+                double v = s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez,
+                                                       L, beam, spin,
+                                                       VFAC, XCOFM,
+                                                       rlens1);
+                s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
+                         ? 0.0 : v;
+            }
+
+            for (size_t i = c0; i < hi; i++) {
+                bool ecl = false;
+                for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
+                    if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
+                        ecl = true;
+                        break;
+                    }
+                if (!ecl)
                     s += s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez, L,
                                                      beam, spin, VFAC,
                                                      XCOFM, rlens1);
-
-                #pragma omp simd reduction(+:s)
-                for (size_t i = b0; i < b1; i++) {
-                    double v = s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez,
-                                                           L, beam, spin,
-                                                           VFAC, XCOFM,
-                                                           rlens1);
-                    s += ecl_range(phin, g.in1[i - n0], g.out1[i - n0])
-                             ? 0.0 : v;
-                }
-
-                for (size_t i = c0; i < hi; i++) {
-                    bool ecl = false;
-                    for (int j = fg.moff[i - n1]; j < fg.moff[i - n1 + 1]; j++)
-                        if (ecl_range(phin, fg.min_[j], fg.mout_[j])) {
-                            ecl = true;
-                            break;
-                        }
-                    if (!ecl)
-                        s += s2_elem<LTYPE, BEAM, GLENS>(g, i, ex, ey, ez, L,
-                                                         beam, spin, VFAC,
-                                                         XCOFM, rlens1);
-                }
-                acc[k] += s;
             }
+            brow[k] = s;
         }
-        #pragma omp critical
-        for (int k = 0; k < nent; k++) out[k] += acc[k];
+    }
+    for (long b = 0; b < nblk; b++) {
+        const double *brow = blk.data() + static_cast<size_t>(b) * nent;
+        for (int k = 0; k < nent; k++) out[k] += brow[k];
     }
 }
 
