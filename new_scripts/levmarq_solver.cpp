@@ -439,6 +439,12 @@ int main(int argc, char* argv[])
         // analytically clean functions; for noisy LC models a larger step is
         // safer.  Override in JSON if needed.
         double fd_step_min = config.value("lm_fd_step_min", 1e-10);
+        // λ is dimensionless here (damping is λ·diag(D²), D_j = ‖J_j‖), so
+        // these thresholds are absolute and star-independent.
+        double tau0        = std::max(config.value("lm_tau", 1e-3), 1e-12);
+        double lambda_conv = config.value("lm_lambda_conv", 1.0);
+        double lambda_max  = config.value("lm_lambda_max",  1e8);
+        int    max_recoveries = config.value("lm_max_recoveries", 3);
         int    max_model_points = config.value("max_model_points", 500);
         int    progress_interval = config.value("progress_interval", 1);
         int    plot_update_interval = config.value("plot_update_interval",
@@ -724,11 +730,58 @@ int main(int argc, char* argv[])
         };
 
         // ─────────────────────────────────────────────────────────────────
-        //  Lambda: compute Jacobian via forward finite differences
+        //  Finite-difference steps
+        //
+        //  Derived from the parameters themselves, the way scipy's
+        //  least_squares and MINPACK do it — the caller never has to supply
+        //  a differencing step.  The `dstep` column of the config used to be
+        //  taken as the step, but it is an MCMC/simplex proposal size (one
+        //  or two per cent of a parameter, a whole degree in iangle) and is
+        //  routinely wrong by orders of magnitude.  Differenced over that,
+        //  the "derivative" is a secant across a large chunk of a strongly
+        //  curved surface: at the start of a typical HW Vir fit it
+        //  overestimates ∂‖r‖/∂iangle by 10× and ∂‖r‖/∂r2 by 2×.  The
+        //  Jacobian then points somewhere the model does not go, every LM
+        //  step gets rejected, λ runs away and the solve dies on the spot —
+        //  exactly the failure seen when the start is already close to the
+        //  solution and the true gradient is small next to the secant's bias.
+        //
+        //      h_j = fd_step_rel · |p_j| + fd_step_min
+        //
+        //  Differences are *central* by default: they cancel the leading
+        //  O(h) curvature bias, which is what makes a step this size usable
+        //  on a model whose accuracy is nowhere near machine precision (the
+        //  Roche surface grid re-tiles and eclipse contact phases are only
+        //  bisected to `delta_phase`, so shrinking h indefinitely just walks
+        //  into quantisation noise).  One extra evaluation per parameter per
+        //  Jacobian buys a Jacobian LM can still trust once steps get small.
+        //  fd_step_rel defaults to ε^{1/4}; the ε^{1/3} that would be optimal
+        //  for an exactly-evaluated function is too small here.
+        vector<double> fd_steps(npar, 0.0);
+        const bool   fd_central = config.value("lm_fd_central", true);
+        // Multiplier on the base step, tightened by the stall recovery below.
+        double       fd_shrink  = 1.0;
+        const double fd_shrink_factor = config.value("lm_fd_shrink", 0.1);
+
+        auto set_fd_steps = [&](const Subs::Array1D<double>& pars,
+                                double shrink)
+        {
+            for (int j = 0; j < npar; ++j) {
+                double h = shrink * (fd_step_rel * std::abs(pars[j])
+                                     + fd_step_min);
+                // Never difference across more than half the allowed range.
+                double span = limits[j].second - limits[j].first;
+                if (std::isfinite(span) && span > 0.0)
+                    h = std::min(h, 0.5 * span);
+                fd_steps[j] = std::max(h, fd_step_min);
+            }
+        };
+
+        // ─────────────────────────────────────────────────────────────────
+        //  Lambda: compute Jacobian by finite differences
         //
         //  MINPACK convention: J[i][j] = ∂r_i / ∂p_j
-        //  Step size:  h_j = fd_step_rel · |p_j| + fd_step_min
-        //  (MINPACK uses √ε · |p_j|; we default to ε^{1/4} for robustness)
+        //  Step size:  fd_steps[j] (see above).
         //
         //  If a step would push p_j outside its bounds, we use a backward
         //  difference instead.
@@ -736,18 +789,16 @@ int main(int argc, char* argv[])
         auto compute_jacobian = [&](const Subs::Array1D<double>& pars,
                             const vector<double>& resid0,
                             vector<vector<double>>& J,
-                            bool central = false) -> bool
+                            bool central = true) -> bool
         {
             J.assign(nresid, vector<double>(npar, 0.0));
 
             for (int j = 0; j < npar; ++j) {
-                // Use user-supplied dstep as the primary step source.
-                // Fall back to relative for safety.
-                double hj = dsteps[j];
+                double hj = fd_steps[j];
                 if (!(hj > 0.0))
                     hj = fd_step_rel * std::abs(pars[j]) + fd_step_min;
 
-                // ── Central differences (used for the final covariance) ──
+                // ── Central differences ──────────────────────────────────
                 // O(h²) accurate vs the O(h) one-sided scheme below.  Only
                 // applied when both ±h stay inside the bounds; if either side
                 // (or an evaluation) fails we fall through to the one-sided
@@ -1134,9 +1185,26 @@ int main(int argc, char* argv[])
                 cout << endl;
             }
 
-            // ── Jacobian ────────────────────────────────────────────────
+            // ── Differencing steps and Jacobian ──────────────────────────
+            //  The column scaling D is rebuilt per stage: turning the priors
+            //  up changes the residual vector by orders of magnitude, so a
+            //  D carried over from the previous stage is meaningless.
+            fd_shrink = 1.0;
+            set_fd_steps(current_pars, fd_shrink);
+            if (vrb) {
+                cout << "  FD steps: ";
+                for (int j = 0; j < npar; ++j)
+                    cout << names[j] << "=" << scientific << setprecision(2)
+                         << fd_steps[j] << (j + 1 < npar ? "  " : "");
+                cout << defaultfloat << (fd_central ? "  (central)"
+                                                    : "  (one-sided)") << endl;
+            }
+
+            D.assign(npar, 1.0);
+            D_initialised = false;
+
             vector<vector<double>> J;
-            compute_jacobian(current_pars, resid, J);
+            compute_jacobian(current_pars, resid, J, fd_central);
             update_scaling(J);
 
             vector<vector<double>> JtJ;
@@ -1144,15 +1212,18 @@ int main(int argc, char* argv[])
             compute_JtJ_Jtr(J, resid, JtJ, Jtr);
 
             // ── λ initialisation ─────────────────────────────────────────
-            //  Re-initialise at first stage or when prior weight changes
-            //  significantly, because the Hessian landscape has shifted.
-            if (lambda < 0.0 || stage > 0) {
-                double max_diag = 0.0;
-                for (int j = 0; j < npar; ++j)
-                    max_diag = std::max(max_diag, JtJ[j][j]);
-                double tau = config.value("lm_tau", 1e-3);
-                lambda = tau * max(max_diag, 1e-30);
-            }
+            //  The damped system is (JᵀJ + λ·diag(D²)) with D_j = ‖J_j‖, so
+            //  λ is *dimensionless*: λ = 1 damps each parameter by roughly
+            //  its own curvature, λ ≪ 1 is Gauss-Newton, λ ≫ 1 is a short
+            //  steepest-descent step.  Nielsen's λ₀ = τ·max diag(JᵀJ) is for
+            //  the unscaled (JᵀJ + λI) form; using it here multiplied the
+            //  damping by max diag(JᵀJ) a second time (~5e9 for a typical
+            //  TESS light curve), so the very first step was ~10⁶ times
+            //  shorter than Gauss-Newton and the solver never moved.
+            //  Re-initialise per stage because the landscape shifts with
+            //  the prior weight.
+            if (lambda < 0.0 || stage > 0)
+                lambda = tau0;
             double nu = 2.0;
 
             if (vrb) {
@@ -1169,6 +1240,7 @@ int main(int argc, char* argv[])
 
             int  stage_iter = 0;
             int  consecutive_fails = 0;
+            int  recoveries = 0;
             bool stage_converged = false;
 
             // ═════════════════════════════════════════════════════════════
@@ -1225,7 +1297,13 @@ int main(int argc, char* argv[])
                 double step_norm = std::sqrt(step_norm_sq);
 
                 // ── xtol check ───────────────────────────────────────────
-                {
+                //  Only meaningful while the step is close to Gauss-Newton.
+                //  A heavily damped step is short by construction, so
+                //  testing it against xtol reports "converged" for a solver
+                //  that is merely stuck — this is what made a start near the
+                //  true solution exit with zero iterations.  When λ is large
+                //  a short step is a stall signal instead, handled below.
+                if (lambda <= lambda_conv) {
                     double xnorm_sq = 0.0;
                     for (int j = 0; j < npar; ++j)
                         xnorm_sq += (current_pars[j] * D[j])
@@ -1300,15 +1378,18 @@ int main(int argc, char* argv[])
                     lambda *= std::max(1.0/3.0, 1.0 - tmp*tmp*tmp);
                     nu = 2.0;
 
-                    compute_jacobian(current_pars, resid, J);
+                    set_fd_steps(current_pars, fd_shrink);
+                    compute_jacobian(current_pars, resid, J, fd_central);
                     update_scaling(J);
                     compute_JtJ_Jtr(J, resid, JtJ, Jtr);
 
                     consecutive_fails = 0;
                     status = "accept";
 
-                    // ftol check
-                    if (sum_sq > 0.0) {
+                    // ftol check — same caveat as xtol: a heavily damped
+                    // step barely moves the cost whether or not we are at an
+                    // optimum, so only trust it near Gauss-Newton.
+                    if (sum_sq > 0.0 && lambda <= lambda_conv) {
                         double rel_actual = std::abs(actual) / sum_sq;
                         double rel_pred   = predicted / sum_sq;
                         if (rel_actual < stage_ftol && rel_pred < stage_ftol) {
@@ -1325,7 +1406,51 @@ int main(int argc, char* argv[])
                     status = "reject";
                 }
 
-                lambda = std::clamp(lambda, 1e-20, 1e20);
+                lambda = std::clamp(lambda, 1e-20, lambda_max);
+
+                // ── Stall recovery ───────────────────────────────────────
+                //  λ pinned at the ceiling means even a near-infinitesimal
+                //  steepest-descent step fails to reduce the cost.  With an
+                //  accurate gradient that cannot happen, so what is wrong is
+                //  the Jacobian: the differencing step no longer resolves
+                //  the surface we are sitting on.  Shrink it and rebuild J
+                //  rather than declaring victory.  This is the self-tuning
+                //  half of the step selection — the caller never has to
+                //  guess a step, and the solver refines its own as it closes
+                //  in.  Once shrinking stops helping we are at the model's
+                //  numerical noise floor and there is genuinely nothing left
+                //  to gain, which is reported as such.
+                if (status == "reject" && lambda >= lambda_max
+                        && recoveries < max_recoveries) {
+                    ++recoveries;
+                    fd_shrink *= fd_shrink_factor;
+                    set_fd_steps(current_pars, fd_shrink);
+                    // D is a running maximum over column norms; the new
+                    // Jacobian is on a different scale, so a stale D would
+                    // over-damp every parameter and the restart would take
+                    // an infinitesimal first step.
+                    D.assign(npar, 1.0);
+                    D_initialised = false;
+                    compute_jacobian(current_pars, resid, J, fd_central);
+                    update_scaling(J);
+                    compute_JtJ_Jtr(J, resid, JtJ, Jtr);
+                    lambda = tau0;
+                    nu = 2.0;
+                    consecutive_fails = 0;
+                    if (vrb)
+                        cout << "  " << setw(5) << left << stage_iter
+                             << "  stalled — FD steps ×"
+                             << scientific << setprecision(2) << fd_shrink
+                             << ", λ → " << lambda << defaultfloat << endl;
+                } else if (status == "reject" && lambda >= lambda_max) {
+                    stage_converged = true;
+                    if (is_final_stage)
+                        stop_reason = "noise floor (no further descent)";
+                    iter_log.push_back({total_iter, sum_sq, chisq_lc, lambda,
+                        step_norm, rho, fev_count, active_prior_scale,
+                        "stall", current_run});
+                    break;
+                }
 
                 iter_log.push_back({total_iter, sum_sq, chisq_lc, lambda,
                     step_norm, rho, fev_count, active_prior_scale, status,
@@ -1600,6 +1725,7 @@ int main(int argc, char* argv[])
             vector<double> r0; double ch0; vector<double> f0;
             if (!compute_residuals(pars, r0, ch0, f0)) return false;
             vector<vector<double>> Jm;
+            set_fd_steps(pars, 1.0);
             compute_jacobian(pars, r0, Jm, /*central=*/true);
             const double dsc = 1.0 / std::sqrt(s2_w);
             for (int i = 0; i < ndata; ++i)
@@ -1756,6 +1882,7 @@ int main(int argc, char* argv[])
                             best_chisq_lc_final, dummy_fit);
 
             vector<vector<double>> J_final;
+            set_fd_steps(best_pars, 1.0);
             compute_jacobian(best_pars, best_resid_final, J_final, /*central=*/true);
 
             // ── Error-bar rescaling (data block only) ────────────────────
