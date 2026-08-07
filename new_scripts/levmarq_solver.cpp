@@ -1873,17 +1873,26 @@ int main(int argc, char* argv[])
         vector<double> sigma_par(npar, 0.0);
         vector<vector<double>> corr_matrix;
         double err_s2 = 1.0;   // χ²_red at the optimum, reused by the error MCMC
+
+        // Numeric core of the covariance estimate, factored out so it can be
+        // re-evaluated should the error-refinement MCMC relocate the adopted
+        // optimum (see the re-anchoring block below).
+        auto covariance_at = [&](const Subs::Array1D<double>& pars,
+                                 vector<vector<double>>& cov_out,
+                                 vector<double>& sigma_out,
+                                 double& s2_lc_out) -> bool
         {
-            model.set_param(best_pars);
-            vector<double> best_resid_final;
-            double best_chisq_lc_final;
+            model.set_param(pars);
+            vector<double> resid_final;
+            double chisq_lc_final;
             vector<double> dummy_fit;
-            compute_residuals(best_pars, best_resid_final,
-                            best_chisq_lc_final, dummy_fit);
+            if (!compute_residuals(pars, resid_final, chisq_lc_final,
+                                   dummy_fit))
+                return false;
 
             vector<vector<double>> J_final;
-            set_fd_steps(best_pars, 1.0);
-            compute_jacobian(best_pars, best_resid_final, J_final, /*central=*/true);
+            set_fd_steps(pars, 1.0);
+            compute_jacobian(pars, resid_final, J_final, /*central=*/true);
 
             // ── Error-bar rescaling (data block only) ────────────────────
             // Rescale ONLY the photometric residual block so its reduced χ²
@@ -1891,9 +1900,9 @@ int main(int argc, char* argv[])
             // prior rows keep their face-value (user-balanced) weight, so the
             // covariance is NOT globally multiplied by s2 afterwards.  With no
             // priors this is identical to the old global-s2 scaling.
-            double s2_lc      = best_chisq_lc_final / std::max(1, ndata - npar);
-            double data_scale = (s2_lc > 0.0) ? 1.0 / std::sqrt(s2_lc) : 1.0;
-            err_s2 = (s2_lc > 0.0) ? s2_lc : 1.0;
+            s2_lc_out = chisq_lc_final / std::max(1, ndata - npar);
+            const double data_scale =
+                (s2_lc_out > 0.0) ? 1.0 / std::sqrt(s2_lc_out) : 1.0;
 
             vector<vector<double>> J_scaled = J_final;
             for (int i = 0; i < ndata; ++i)
@@ -1902,10 +1911,32 @@ int main(int argc, char* argv[])
 
             vector<vector<double>> JtJ_final;
             vector<double> Jtr_final;
-            compute_JtJ_Jtr(J_scaled, best_resid_final, JtJ_final, Jtr_final);
+            compute_JtJ_Jtr(J_scaled, resid_final, JtJ_final, Jtr_final);
 
+            if (!invert_spd(JtJ_final, cov_out)) return false;
+            sigma_out.assign(npar, 0.0);
+            for (int i = 0; i < npar; ++i)
+                sigma_out[i] = std::sqrt(std::max(cov_out[i][i], 0.0));
+            return true;
+        };
+
+        // Correlation matrix from a covariance/σ pair.
+        auto correlations_from = [&](const vector<vector<double>>& cov,
+                                     const vector<double>& sigma) {
+            vector<vector<double>> corr(npar, vector<double>(npar, 0.0));
+            for (int i = 0; i < npar; ++i)
+                for (int j = 0; j < npar; ++j)
+                    corr[i][j] = (sigma[i] > 0 && sigma[j] > 0)
+                        ? cov[i][j] / (sigma[i] * sigma[j]) : 0.0;
+            return corr;
+        };
+
+        {
             vector<vector<double>> cov;
-            bool inv_ok = invert_spd(JtJ_final, cov);
+            vector<double> sigma;
+            double s2_lc = 1.0;
+            const bool inv_ok = covariance_at(best_pars, cov, sigma, s2_lc);
+            err_s2 = (s2_lc > 0.0) ? s2_lc : 1.0;
 
             if (inv_ok) {
                 // No global s2 multiply: data block already rescaled above,
@@ -1918,13 +1949,10 @@ int main(int argc, char* argv[])
                 for (int i = 0; i < npar; ++i)
                     mw = std::max(mw, names[i].size());
 
-                vector<double> sigma(npar);
-                for (int i = 0; i < npar; ++i) {
-                    sigma[i] = std::sqrt(std::max(cov[i][i], 0.0));
+                for (int i = 0; i < npar; ++i)
                     cout << "  " << setw(int(mw)) << left << names[i]
                         << " = " << fixed << setprecision(6) << best_pars[i]
                         << " ± " << sigma[i] << endl;
-                }
 
                 // Build ParamCovariance for error propagation
                 pcov.npar = npar;
@@ -1942,11 +1970,7 @@ int main(int argc, char* argv[])
                 sigma_par = sigma;
 
                 // Correlation matrix
-                corr_matrix.assign(npar, vector<double>(npar, 0.0));
-                for (int i = 0; i < npar; ++i)
-                    for (int j = 0; j < npar; ++j)
-                        corr_matrix[i][j] = (sigma[i] > 0 && sigma[j] > 0)
-                            ? cov[i][j] / (sigma[i] * sigma[j]) : 0.0;
+                corr_matrix = correlations_from(cov, sigma);
 
                 if (npar <= 20) {
                     cout << "\n" << BRIGHT_CYAN << "Correlation matrix:"
@@ -1984,7 +2008,7 @@ int main(int argc, char* argv[])
                         cov_info["correlations"][key]  = corr_matrix[i][j];
                     }
                 }
-                cov_info["reduced_chi2"]     = best_chisq_lc_final / max(1, ndata - npar);
+                cov_info["reduced_chi2"]      = s2_lc;
                 cov_info["residual_variance"] = s2_lc;
 
                 // Implied physical quantities with propagated errors
@@ -2133,6 +2157,35 @@ int main(int argc, char* argv[])
             samples.reserve(emc_steps_total);
             long accepted_total = 0, drawn_total = 0;
 
+            // ── Best posterior state seen anywhere in the sampling ───────
+            //
+            //  LM terminates on the finite-difference noise floor (or on its
+            //  evaluation budget), which on a grid-discretised light-curve
+            //  model is regularly *short* of the true optimum.  The chain,
+            //  being derivative-free, then keeps finding better states and
+            //  marches away from the anchor — which is exactly what floors
+            //  one side of every percentile interval to zero.  Track the
+            //  highest log posterior visited so the anchor can be moved
+            //  there afterwards (see the re-anchoring block below).
+            //
+            //  The objective is the un-tempered numerator of the acceptance
+            //  ratio, −½χ²_LC + log-prior; err_s2 is a positive constant and
+            //  so cannot change the ranking.  When lm_error_mcmc_prior_weight
+            //  is left at its default this is exactly −½ × the LM cost, so
+            //  "better here" means "better for LM too".
+            Subs::Array1D<double> map_pars = best_pars;
+            vector<double>        map_fit  = best_fit;
+            double map_chisq  = best_chisq;
+            double map_lp     = -1e300;
+            int    map_mode_k = -1;   // which entry of sample_modes found it
+            int    cur_mode_k = -1;   // set before each run_error_chain call
+            {
+                vector<double> r_t, f_t;
+                double c_t;
+                if (compute_residuals(best_pars, r_t, c_t, f_t))
+                    map_lp = -0.5 * c_t + log_prior_at(best_pars);
+            }
+
             // ── One adaptive RWM chain confined to a mode ────────────────
             auto run_error_chain = [&](const Subs::Array1D<double>& start,
                                        const vector<vector<double>>* Cmode,
@@ -2207,6 +2260,17 @@ int main(int argc, char* argv[])
                         }
                     }
 
+                    // Burn-in states count too: they are ordinary parameter
+                    // vectors inside the limits, and a better one there is
+                    // still a better one.
+                    if (acc && -0.5 * chi_cur + lp_cur > map_lp) {
+                        map_lp     = -0.5 * chi_cur + lp_cur;
+                        map_chisq  = chi_cur;
+                        map_pars   = cur;
+                        map_fit    = fit_cur;
+                        map_mode_k = cur_mode_k;
+                    }
+
                     if (step < nburn) {
                         ++batch_n;
                         if (acc) ++batch_acc;
@@ -2250,33 +2314,158 @@ int main(int argc, char* argv[])
                 return true;
             };
 
-            for (size_t k = 0; k < sample_modes.size(); ++k) {
-                ModeInfo& m = modes[sample_modes[k]];
-                const LMRun& r = runs[m.run_idx];
-                const int nst = nsteps_mode[k];
-                const int nbr = std::max(300, nst / 5);
-                cout << "  mode " << sample_modes[k] + 1
-                     << ": mass " << fixed << setprecision(3) << m.weight
-                     << " → " << nst << " steps (+" << nbr << " burn-in)"
-                     << endl;
-                int kept = 0;
-                if (!run_error_chain(r.pars,
-                                     m.has_cov ? &m.cov : nullptr,
-                                     nst, nbr, kept))
+            // ── Adopt the best state seen as the reported solution ───────
+            //
+            //  Unlike substituting per-parameter marginal medians (which
+            //  builds jointly inconsistent, often unphysical parameter sets
+            //  off the degeneracy ridge), a chain state is a single coherent
+            //  parameter vector that satisfies the limits and the priors by
+            //  construction, and it has a strictly lower cost than the point
+            //  LM stopped at.
+            auto adopt_map = [&]() {
+                cout << BRIGHT_YELLOW
+                     << "  ⚠ Found a state better than the current optimum: "
+                        "χ²_LC " << fixed << setprecision(4) << best_chisq
+                     << " → " << map_chisq << RESET << endl;
+
+                best_pars  = map_pars;
+                best_chisq = map_chisq;
+                best_fit   = map_fit;
+                {
+                    vector<double> r_t, f_t;
+                    double c_t, ss = 0.0;
+                    if (compute_residuals(best_pars, r_t, c_t, f_t)) {
+                        for (double rr : r_t) ss += rr * rr;
+                        best_sum_sq = ss;
+                    }
+                }
+
+                // The covariance, σ and correlations were evaluated at the
+                // old point; refresh them so the fallback errors and the
+                // report describe the solution actually being reported.
+                // err_s2 stays at the value the chains were tempered with,
+                // so every round summarises the same target distribution.
+                vector<vector<double>> cov_new;
+                vector<double> sigma_new;
+                double s2_new = err_s2;
+                if (covariance_at(best_pars, cov_new, sigma_new, s2_new)) {
+                    pcov.npar       = npar;
+                    pcov.cov        = cov_new;
+                    pcov.idx_iangle = iangle_idx;
+                    pcov.idx_q      = q_idx;
+                    pcov.idx_vs     = vs_idx;
+                    pcov.idx_r1     = r1_idx;
+                    pcov.idx_r2     = r2_idx;
+                    pcov.idx_t1     = t1_idx;
+                    pcov.idx_t2     = t2_idx;
+                    sigma_par       = sigma_new;
+                    corr_matrix     = correlations_from(cov_new, sigma_new);
+                    has_covariance  = true;
+                    json& ci = config["lm_results"];
+                    for (int i = 0; i < npar; ++i) {
+                        ci["sigma"][names[i]]    = sigma_new[i];
+                        ci["best_fit"][names[i]] = (double)best_pars[i];
+                        for (int j = 0; j < npar; ++j) {
+                            const string key = names[i] + "," + names[j];
+                            ci["covariance"][key]   = cov_new[i][j];
+                            ci["correlations"][key] = corr_matrix[i][j];
+                        }
+                    }
+                    ci["reduced_chi2"]      = s2_new;
+                    ci["residual_variance"] = s2_new;
+                }
+            };
+
+            // ── Sampling rounds ─────────────────────────────────────────
+            //
+            //  A chain launched from a point that is not the optimum spends
+            //  the whole run descending, and its percentiles then describe a
+            //  transient trajectory whose *leading edge* is the anchor — one
+            //  side of every interval collapses no matter which state we
+            //  anchor on.  So whenever a round turns up a materially better
+            //  state, adopt it and sample again from there.  A round that
+            //  finds no improvement was started at the optimum, which is the
+            //  only situation in which the percentiles mean anything.
+            const int reanchor_rounds =
+                std::max(0, config.value("lm_reanchor_rounds", 2));
+            const double reanchor_tol = config.value("lm_reanchor_tol", 0.5);
+
+            double acc_rate = 0.0;
+            bool   reanchored = false;
+            for (int round = 0; ; ++round) {
+                samples.clear();
+                accepted_total = drawn_total = 0;
+                const double round_start_lp = map_lp;
+
+                for (size_t k = 0; k < sample_modes.size(); ++k) {
+                    ModeInfo& m = modes[sample_modes[k]];
+                    const LMRun& r = runs[m.run_idx];
+                    const int nst = nsteps_mode[k];
+                    const int nbr = std::max(300, nst / 5);
+                    // The mode that produced the current anchor restarts from
+                    // it; the others keep their own LM optimum.
+                    const bool anchored_here =
+                        reanchored && int(k) == map_mode_k;
+                    cout << "  mode " << sample_modes[k] + 1
+                         << ": mass " << fixed << setprecision(3) << m.weight
+                         << " → " << nst << " steps (+" << nbr << " burn-in)"
+                         << (anchored_here ? "  [from re-anchored point]" : "")
+                         << endl;
+                    int kept = 0;
+                    cur_mode_k = int(k);
+                    if (!run_error_chain(anchored_here ? best_pars : r.pars,
+                                         m.has_cov ? &m.cov : nullptr,
+                                         nst, nbr, kept))
+                        cout << BRIGHT_YELLOW
+                             << "    could not evaluate this mode — skipped."
+                             << RESET << endl;
+                    m.n_samples = kept;
+                    cout << "\r    done (" << kept << " samples kept)"
+                         << "                    " << endl;
+                }
+
+                acc_rate = drawn_total == 0 ? 0.0
+                    : double(accepted_total) / drawn_total;
+                cout << "  pooled: " << samples.size()
+                     << " samples, acceptance (post burn-in): "
+                     << fixed << setprecision(1) << 100.0 * acc_rate
+                     << "%" << endl;
+
+                const double gain = 2.0 * (map_lp - round_start_lp);
+                if (gain <= reanchor_tol)
+                    break;                      // started at the optimum
+
+                if (round >= reanchor_rounds) {
+                    // Deliberately do NOT adopt here.  These samples trace a
+                    // chain that was still descending, so its best state sits
+                    // at the leading edge of its own trajectory — anchoring
+                    // there would rebuild the very bias this loop exists to
+                    // remove.  Keep the point the round was launched from,
+                    // which is what the samples are actually distributed
+                    // around, and say plainly that the fit is not converged.
                     cout << BRIGHT_YELLOW
-                         << "    could not evaluate this mode — skipped."
+                         << "  ⚠ Still descending after " << round + 1
+                         << " sampling rounds (last gain Δ(−2 log post) = "
+                         << fixed << setprecision(2) << gain
+                         << ", best unadopted χ²_LC = "
+                         << setprecision(4) << map_chisq
+                         << ").  The fit has not converged; the quoted "
+                            "intervals are lower limits at best — raise "
+                            "lm_max_fev, lm_error_mcmc_steps or "
+                            "lm_reanchor_rounds."
                          << RESET << endl;
-                m.n_samples = kept;
-                cout << "\r    done (" << kept << " samples kept)"
-                     << "                    " << endl;
+                    break;
+                }
+
+                reanchored = true;
+                adopt_map();
+                cout << "  → resampling from the improved point (round "
+                     << round + 2 << "/" << reanchor_rounds + 1 << ")"
+                     << endl;
             }
 
-            const double acc_rate = drawn_total == 0 ? 0.0
-                : double(accepted_total) / drawn_total;
-            cout << "  pooled: " << samples.size()
-                 << " samples, acceptance (post burn-in): "
-                 << fixed << setprecision(1) << 100.0 * acc_rate
-                 << "%" << endl;
+            if (reanchored)
+                stop_reason += " (re-anchored on error-MCMC state)";
 
 #ifdef HAVE_CUDA
             const std::uint64_t cuda_flux_calls =
